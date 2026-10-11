@@ -1,0 +1,2 @@
+[env]
+CLANG_MODULE_CACHE_PATH = { value = "target/clang-module-cache", relative = true }

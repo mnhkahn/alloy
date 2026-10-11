@@ -1,0 +1,31 @@
+[package]
+name = "alloy"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "A macOS Git workspace with editable diffs and three-way merging"
+
+[features]
+default = ["gui"]
+gui = ["dep:gpui-rhai", "dep:gpui-rhai-registry", "dep:semver"]
+
+[dependencies]
+gpui-rhai = { path = "../gpui-rhai/crates/gpui-rhai", optional = true }
+gpui-rhai-registry = { path = "../gpui-rhai/registry", optional = true }
+semver = { version = "1", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+similar = "=3.2.0"
+tempfile = "3"
+
+[[bin]]
+name = "alloy"
+path = "src/main.rs"
+required-features = ["gui"]
+
+[profile.dev]
+debug = 0
+
+[profile.release]
+strip = true
+lto = "thin"
