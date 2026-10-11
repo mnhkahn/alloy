@@ -5,3 +5,4 @@ pub mod llm;
 pub mod preview;
 pub mod projects;
 pub mod tag;
+pub mod watch;

@@ -12,6 +12,10 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
         gpui_rhai_registry::BUNDLED_COMPONENT_SOURCES_BY_ID
             .iter()
             .map(|(id, source)| (ModuleId::parse(*id).unwrap(), (*source).to_string()))
+            .chain(std::iter::once((
+                ModuleId::parse("components/watch_timer").unwrap(),
+                include_str!("../ui/watch_timer.rhai").to_string(),
+            )))
             .collect(),
     );
     let mut engine = RuntimeEngine::new();
@@ -134,6 +138,39 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
                     .map_err(error)?;
                 Ok(())
             };
+        // A refresh completed for an older UI context must not be applied or acknowledged.
+        let root = if let UiValue::Map(fields) = &snapshot {
+            fields["root"].clone()
+        } else {
+            UiValue::Null
+        };
+        let response = |epoch| {
+            UiValue::Map(BTreeMap::from([
+                ("watch_root".into(), root.clone()),
+                ("watch_epoch".into(), epoch),
+                ("revision".into(), UiValue::Integer(99)),
+                ("update".into(), UiValue::Null),
+            ]))
+        };
+        let seen = get("watch_seen");
+        call(&mut life, "watch_loaded", response(UiValue::Integer(-1)))?;
+        assert_eq!(get("watch_seen"), seen);
+        call(
+            &mut life,
+            "draft_change",
+            UiValue::String("unsaved auto-refresh draft".into()),
+        )?;
+        call(&mut life, "watch_loaded", response(get("watch_epoch")))?;
+        assert_eq!(
+            get("draft"),
+            UiValue::String("unsaved auto-refresh draft".into())
+        );
+        assert_eq!(
+            get("watch_seen"),
+            seen,
+            "deferred changes must remain pending"
+        );
+        call(&mut life, "draft_change", doc["right"].clone())?;
         let before = get("included");
         call(&mut life, "toggle_include", path.clone())?;
         assert_eq!(

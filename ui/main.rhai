@@ -1,3 +1,4 @@
+import "components/watch_timer" as watch_timer;
 import "components/input" as input;
 import "components/select" as select;
 import "components/textarea" as textarea;
@@ -7,6 +8,10 @@ import "components/code_viewer" as code;
 fn string_field(value) { #{ schema: #{ type: "string" }, "default": #{ type: "string", value: value } } }
 fn bool_field(value) { #{ schema: #{ type: "bool" }, "default": #{ type: "bool", value: value } } }
 fn state_schema() { #{ fields: #{
+    watch_tick_id: #{schema:#{type:"integer"}, "default":#{type:"integer",value:0}},
+    watch_epoch: #{schema:#{type:"integer"}, "default":#{type:"integer",value:0}},
+    watch_seen: #{schema:#{type:"integer"}, "default":#{type:"integer",value:0}},
+    watch_pending: bool_field(false), watch_root: string_field(""),
     root: string_field(""), url: string_field(""), filter: string_field(""), message: string_field("Opening Alloy…"), commit: string_field(""),
     draft: string_field(""), mode: string_field("split"), tab: string_field("work"), confirm: string_field(""),
     hide_unchanged: bool_field(true), mode_open: bool_field(false), whitespace_open: bool_field(false), whitespace: string_field("exact"),
@@ -91,6 +96,7 @@ fn loaded(ctx, result) {
     if "tagged" in result { ctx.set_state("tag",()); ctx.set_state("tag_choice",""); }
 }
 fn request(ctx, op, extra) {
+    watch_invalidate(ctx);
     if ctx.get_state("selecting") { return; }
     if ctx.get_state("busy") { return; }
     let d = ctx.get_state("doc");
@@ -100,6 +106,32 @@ fn request(ctx, op, extra) {
     for key in extra.keys() { data[key] = extra[key]; }
     ctx.set_state("busy", true); status(ctx, `${op}…`);
     ctx.start_task("alloy.git", "execute", data, Fn("loaded"), Fn("failed"));
+}
+fn watch_invalidate(ctx) {ctx.set_state("watch_epoch",ctx.get_state("watch_epoch")+1);}
+fn watch_blocked(ctx) {ctx.get_state("busy") || ctx.get_state("selecting") || dirty(ctx) || ctx.get_state("confirm") != ""}
+fn watch_tick(ctx,payload) {
+ ctx.set_state("watch_tick_id",ctx.get_state("watch_tick_id")+1);
+ let s=ctx.get_state("snapshot");
+ if s == () || ctx.get_state("watch_pending") || watch_blocked(ctx) {return;}
+ if ctx.get_state("watch_root") != s.root {ctx.set_state("watch_root",s.root);ctx.set_state("watch_seen",0);}
+ let d=ctx.get_state("doc");
+ ctx.set_state("watch_pending",true);
+ ctx.start_task("alloy.git","execute",#{op:"watch",root:s.root,path:if d==() {""} else {d.path},staged:ctx.get_state("tab")=="staged",seen:ctx.get_state("watch_seen"),epoch:ctx.get_state("watch_epoch")},Fn("watch_loaded"),Fn("watch_failed"));
+}
+fn watch_failed(ctx,error) {ctx.set_state("watch_pending",false);status(ctx,`Auto-refresh: ${error}`);}
+fn watch_loaded(ctx,result) {
+ ctx.set_state("watch_pending",false);
+ let s=ctx.get_state("snapshot");
+ if s==() || s.root!=result.watch_root || ctx.get_state("watch_epoch")!=result.watch_epoch || watch_blocked(ctx) {return;}
+ if result.revision==() {return;}
+ ctx.set_state("watch_seen",result.revision);
+ let update=result.update;
+ if update==() {return;}
+ if ctx.get_state("doc")==() {update.document=();}
+ if s==update.snapshot && ctx.get_state("doc")==update.document {return;}
+ let message=ctx.get_state("message"); let editing=ctx.get_state("editor"); let tab=ctx.get_state("tab");
+ loaded(ctx,update);
+ ctx.set_state("message",message);ctx.set_state("editor",editing);ctx.set_state("tab",tab);
 }
 fn guard(ctx) {
     if ctx.get_state("selecting") { return false; }
@@ -192,7 +224,7 @@ fn root_change(ctx, value) { ctx.set_state("root", value); }
 fn url_change(ctx, value) { ctx.set_state("url", value); }
 fn filter_change(ctx, value) { ctx.set_state("filter", value); }
 fn commit_change(ctx, value) { ctx.set_state("commit", value); }
-fn draft_change(ctx, value) { if !ctx.get_state("selecting") { ctx.set_state("draft", value); } }
+fn draft_change(ctx, value) { watch_invalidate(ctx); if !ctx.get_state("selecting") { ctx.set_state("draft", value); } }
 fn open_repo(ctx, payload) { if guard(ctx) { request(ctx, "open", #{}); } }
 fn browse(ctx, payload) { if guard(ctx) { request(ctx, "browse", #{}); } }
 fn clone_repo(ctx, payload) { if guard(ctx) { request(ctx, "clone", #{url:ctx.get_state("url")}); } }
@@ -207,6 +239,7 @@ fn selected(ctx, result) {
     else { status(ctx, result.message); }
 }
 fn select_file(ctx, path, staged) {
+    watch_invalidate(ctx);
     if ctx.get_state("busy") { return; }
     if dirty(ctx) { status(ctx, "You have an unsaved draft. Save it or discard it before changing context."); return; }
     let d = ctx.get_state("doc");
@@ -221,6 +254,7 @@ fn select(ctx, path) { select_file(ctx, path, ctx.get_state("tab") == "staged");
 fn set_tab(ctx, value) { let d = ctx.get_state("doc"); if d != () { select_file(ctx, d.path, value == "staged"); } }
 fn opened(ctx) { let tabs = ctx.get_state("open_tabs"); if tabs == () {[]} else {tabs} }
 fn close_tab(ctx, path) {
+    watch_invalidate(ctx);
     let d = ctx.get_state("doc");
     if ctx.get_state("selecting") || ctx.get_state("busy") { return; }
     if d != () && d.path == path && !guard(ctx) { return; }
@@ -449,7 +483,7 @@ fn sidebar(ctx,s) {
 fn content(ctx) {
     let d = ctx.get_state("doc");
     if d == () {
-        return column([text("Select a file to review").with_style(style().typography("display")),small("Choose a changed file on the left. Press ⌘⌥Y to refresh.")])
+        return column([text("Select a file to review").with_style(style().typography("display")),small("Choose a changed file on the left. File changes refresh automatically.")])
             .with_style(style().flex_grow().items_center().justify_center().gap(px(12)));
     }
     let toolbar = [
@@ -549,7 +583,7 @@ fn view(ctx) {
             small("Full-context diffs  /  Editable results  /  Three-way conflict resolution")
         ]).with_style(style().flex_grow().justify_center().padding(px(90)).gap(px(20)))
     } else { row(if ctx.get_state("sidebar_visible") {[sidebar(ctx,s),content(ctx)]} else {[content(ctx)]}).with_style(style().flex_grow().min_height(px(0)).min_width(px(0))) };
-    column([header,pathbar,project_form(ctx),palette_view(ctx),confirmation(ctx),body,
+    column([watch_timer::WatchTimer(#{key:"watch-timer",sequence:ctx.get_state("watch_tick_id"),on_tick:Fn("watch_tick")}),header,pathbar,project_form(ctx),palette_view(ctx),confirmation(ctx),body,
         text(if ctx.get_state("selecting") {`Loading ${ctx.get_state("pending_path")}…`} else {ctx.get_state("message")}).with_key("status").with_style(style().font_size(px(11)).padding_x(px(10)).padding_y(px(3)).min_height(px(24)).max_height(px(60)).overflow_y_scroll().background(theme_color("surface_raised")).text_color(theme_color("text_muted")))
     ]).with_style(style().font_size(px(13)).line_height(px(18)).width(relative(1)).height(relative(1)).min_width(px(0)).min_height(px(0)).background(theme_color("surface")).text_color(theme_color("text_primary")))
 }

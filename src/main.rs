@@ -1,3 +1,4 @@
+mod app_icon;
 mod bridge;
 mod check;
 mod shortcuts;
@@ -31,6 +32,10 @@ fn prepare(
 ) -> Result<gpui_rhai::PreparedScriptView, gpui_rhai::ScriptViewError> {
     let entry = ModuleId::parse("main").unwrap();
     let mut sources = BTreeMap::from([(entry.clone(), include_str!("../ui/main.rhai").into())]);
+    sources.insert(
+        ModuleId::parse("components/watch_timer").unwrap(),
+        include_str!("../ui/watch_timer.rhai").into(),
+    );
     for &(id, source) in gpui_rhai_registry::BUNDLED_COMPONENT_SOURCES_BY_ID {
         if [
             "components/input",
@@ -107,6 +112,7 @@ fn main() {
             if let Err(error) = ScriptApplication::new(prepared)
                 .window_size(1440.0, 900.0)
                 .window_options(|mut options, _| {
+                    app_icon::install();
                     if let Some(titlebar) = options.titlebar.as_mut() {
                         titlebar.title = Some("Alloy".into());
                     }

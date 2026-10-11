@@ -15,6 +15,7 @@ pub struct GitExtension {
     pub gate: Arc<Mutex<()>>,
 }
 struct Handler {
+    watcher: Arc<Mutex<Option<alloy::watch::RepositoryWatch>>>,
     initial: String,
     gate: Arc<Mutex<()>>,
 }
@@ -66,6 +67,7 @@ impl ScriptViewExtension for GitExtension {
                     )]),
                 },
                 Handler {
+                    watcher: Arc::new(Mutex::new(None)),
                     initial: self.initial.clone(),
                     gate: self.gate.clone(),
                 },
@@ -76,10 +78,32 @@ impl ScriptViewExtension for GitExtension {
 impl AsyncCapabilityHandler for Handler {
     fn start(&mut self, _: &str, input: UiValue) -> Result<TaskWork, String> {
         let data = from_ui(input);
+        let watcher = self.watcher.clone();
         let initial = self.initial.clone();
         let gate = self.gate.clone();
         Ok(TaskWork::new(move || {
             let _guard = gate.lock().map_err(|e| e.to_string())?;
+            if string(&data, "op") == "watch" {
+                let mut current = watcher.lock().map_err(|e| e.to_string())?;
+                let root = std::path::Path::new(string(&data, "root"));
+                if current.as_ref().is_none_or(|w| w.root != root) {
+                    *current = None;
+                    *current = Some(alloy::watch::RepositoryWatch::new(&Repository::open(
+                        string(&data, "root"),
+                    )?)?);
+                }
+                let revision = current
+                    .as_ref()
+                    .unwrap()
+                    .revision(data["seen"].as_u64().unwrap_or(0))?;
+                let mut output = json!({"watch_root":data["root"],"watch_epoch":data["epoch"],"revision":revision,"update":null});
+                if revision.is_some() {
+                    let mut refresh = data.clone();
+                    refresh["op"] = json!("refresh");
+                    output["update"] = execute(&refresh, &initial)?;
+                }
+                return Ok(to_ui(output));
+            }
             let output = match execute(&data, &initial) {
                 Ok(value) => value,
                 Err(error) if string(&data, "op") == "select" => {

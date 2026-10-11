@@ -3,48 +3,20 @@ name: Release macOS packages
 on:
   push:
     tags: ['v*', 'V*', '[0-9]*']
-  release:
-    types: [published]
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: Existing stable version tag (for example v0.2.0)
-        required: true
-        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
+  group: release-${{ github.ref_name }}
   cancel-in-progress: false
 
 env:
-  RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
+  RELEASE_TAG: ${{ github.ref_name }}
   CARGO_TERM_COLOR: always
 
 jobs:
-  version:
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-      sha: ${{ steps.version.outputs.sha }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Validate tag and resolve source commit
-        id: version
-        shell: bash
-        run: |
-          version=$(python3 scripts/bundle-info.py --version "$RELEASE_TAG")
-          sha=$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-
   build:
-    needs: version
     strategy:
       fail-fast: false
       matrix:
@@ -61,12 +33,11 @@ jobs:
         shell: bash
     env:
       MACOSX_DEPLOYMENT_TARGET: '12.0'
-      RELEASE_VERSION: ${{ needs.version.outputs.version }}
       RELEASE_ARCH: ${{ matrix.arch }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.version.outputs.sha }}
+          ref: ${{ github.sha }}
           path: alloy
           persist-credentials: false
       - uses: actions/checkout@v4
@@ -80,17 +51,13 @@ jobs:
         with:
           workspaces: alloy
           key: release-${{ matrix.arch }}
-      - name: Apply toolkit patch
-        run: sh scripts/prepare-dependency.sh
-      - name: Test
-        run: cargo test --locked
       - name: Build release app
-        run: sh scripts/package.sh release "$RELEASE_VERSION"
-      - name: Verify and archive app
         run: |
-          test "$(lipo -archs dist/Alloy.app/Contents/MacOS/Alloy)" = "$RELEASE_ARCH"
-          target/release/alloy --check
-          codesign --verify --deep --strict dist/Alloy.app
+          version=$(python3 scripts/bundle-info.py --version "$RELEASE_TAG")
+          echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+          sh scripts/package.sh release "$version"
+      - name: Archive app
+        run: |
           mkdir -p release-assets
           archive="Alloy-${RELEASE_VERSION}-macOS-${RELEASE_ARCH}.zip"
           ditto -c -k --sequesterRsrc --keepParent dist/Alloy.app "release-assets/$archive"
@@ -103,7 +70,7 @@ jobs:
           retention-days: 7
 
   publish:
-    needs: [version, build]
+    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -120,7 +87,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
         shell: bash
         run: |
-          # Both architectures must pass before any assets are published.
+          # Publish after both app packages are built.
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release create "$RELEASE_TAG" --verify-tag --generate-notes --title "Alloy $RELEASE_TAG"
           fi

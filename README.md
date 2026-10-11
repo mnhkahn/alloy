@@ -72,12 +72,14 @@ Toolbar shortcuts (also printed on the buttons): Refresh `⌘⌥Y`, Fetch `⌘�
 
 ## Release packages
 
-`.github/workflows/release.yml` builds optimized macOS apps for Apple Silicon (`arm64`) and Intel (`x86_64`), then attaches ZIP archives and SHA-256 checksum files to a GitHub Release. Both builds and tests must succeed before publishing assets.
+`.github/workflows/release.yml` builds optimized macOS apps for Apple Silicon (`arm64`) and Intel (`x86_64`), then attaches ZIP archives and SHA-256 checksum files to a GitHub Release. Both architecture packages must build successfully before publishing assets. The workflow only builds, packages and publishes; it does not run tests, formatting checks, Clippy or UI checks.
 
-Commit and push the workflow and packaging scripts first. Pushing a stable version tag (`v1.2.3`, `V1.2.3` or `1.2.3`) triggers packaging and creates a Release with generated notes if needed. Publishing a Release manually also triggers packaging. For retries, use **Actions → Release macOS packages → Run workflow** and enter an existing tag. Reruns replace that tag's assets. No extra token is needed: publishing uses the workflow's `GITHUB_TOKEN` with `contents: write`.
+Commit and push the workflow and packaging scripts first. Pushing a stable version tag (`v1.2.3`, `V1.2.3` or `1.2.3`) triggers packaging and creates a Release with generated notes if needed. Ordinary branch pushes, pull requests and manual Release publication do not trigger any workflow. For retries, use **Re-run jobs** on the existing tag workflow run. Reruns replace that tag's assets. No extra token is needed: publishing uses the workflow's `GITHUB_TOKEN` with `contents: write`.
 
 The app's bundle version comes from the tag. Local packaging defaults to the Cargo version, or accepts an override: `sh scripts/package.sh release v1.2.3`. Assets are named `Alloy-1.2.3-macOS-arm64.zip` and `Alloy-1.2.3-macOS-x86_64.zip`. The bundled app uses an ad-hoc signature; Developer ID signing and Apple notarization are not configured.
 
 Git network operations use macOS manual HTTP/HTTPS system proxies when no explicit proxy environment variable is set. Git proxy configuration continues to take precedence. Automatic proxy scripts (PAC) are not evaluated. An empty remote tag list starts version selection at `v0.0.0`; a failed remote lookup blocks tagging and reports a network/authentication error.
 
 Diff views hide unchanged sections by default, keeping three context lines around each change. Use **Show all lines / Hide unchanged** in the diff toolbar to toggle the full file; click an “unchanged lines” separator to expand one folded section. This changes only the display, not staging or file contents.
+
+The active repository refreshes automatically from native filesystem events, including worktree files, the Git index, HEAD and refs (also with external Git directories/worktrees). Changes are coalesced before reading Git state; idle ticks only check the event counter. Refresh results are deferred while editing unsaved drafts or confirming an operation, and discarded after switching files/projects or starting another operation. Manual Refresh remains available. This does not automatically fetch from remotes.
