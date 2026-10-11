@@ -196,7 +196,8 @@ fn clone_fetch_pull_push_against_local_remote() {
         &r.root,
         &["remote", "add", "origin", remote.path().to_str().unwrap()],
     );
-    git(&r.root, &["push", "-u", "origin", "main"]);
+    r.network("push").unwrap();
+    assert_eq!(r.snapshot().unwrap().upstream, "origin/main");
     let clone_parent = TempDir::new().unwrap();
     let clone_path = clone_parent.path().join("clone");
     let other = clone_repository(
@@ -912,4 +913,120 @@ fn staged_blocks_reject_unrepresentable_external_index() {
             .is_err()
     );
     assert!(r.staged_diff().unwrap().contains("+staged only"));
+}
+
+#[test]
+fn first_push_selects_remote_and_sets_tracking() {
+    for (names, configured, expected) in [
+        (vec!["backup"], None, "backup"),
+        (vec!["backup", "origin"], None, "origin"),
+        (
+            vec!["backup", "origin"],
+            Some(("remote.pushDefault", "backup")),
+            "backup",
+        ),
+        (
+            vec!["backup", "origin"],
+            Some(("branch.main.pushRemote", "backup")),
+            "backup",
+        ),
+    ] {
+        let (_dir, r) = fixture();
+        let targets: Vec<_> = names
+            .iter()
+            .map(|name| {
+                let remote = TempDir::new().unwrap();
+                git(remote.path(), &["init", "--bare", "-b", "main"]);
+                git(
+                    &r.root,
+                    &["remote", "add", name, remote.path().to_str().unwrap()],
+                );
+                remote
+            })
+            .collect();
+        if let Some((key, value)) = configured {
+            git(&r.root, &["config", key, value]);
+        }
+        r.network("push").unwrap();
+        assert_eq!(r.snapshot().unwrap().upstream, format!("{expected}/main"));
+        for (name, target) in names.iter().zip(&targets) {
+            assert_eq!(
+                run(
+                    target.path(),
+                    &["rev-parse", "--verify", "refs/heads/main"],
+                    None
+                )
+                .is_ok(),
+                *name == expected
+            );
+        }
+    }
+}
+
+#[test]
+fn first_push_rejects_ambiguous_targets_and_detached_head() {
+    let (_dir, r) = fixture();
+    assert!(r.network("push").unwrap_err().contains("No remote"));
+    let target = TempDir::new().unwrap();
+    git(target.path(), &["init", "--bare"]);
+    for name in ["one", "two"] {
+        git(
+            &r.root,
+            &["remote", "add", name, target.path().to_str().unwrap()],
+        );
+    }
+    assert!(r.network("push").unwrap_err().contains("Multiple remotes"));
+    git(&r.root, &["config", "remote.pushDefault", "missing"]);
+    assert!(
+        r.network("push")
+            .unwrap_err()
+            .contains("not a named remote")
+    );
+    git(&r.root, &["config", "remote.pushDefault", "one"]);
+    for _ in 0..2 {
+        git(
+            &r.root,
+            &[
+                "config",
+                "--add",
+                "remote.one.pushurl",
+                target.path().to_str().unwrap(),
+            ],
+        );
+    }
+    assert!(
+        r.network("push")
+            .unwrap_err()
+            .contains("multiple push URLs")
+    );
+    git(&r.root, &["checkout", "--detach"]);
+    assert!(r.network("push").unwrap_err().contains("detached HEAD"));
+    assert!(
+        run(
+            target.path(),
+            &["rev-parse", "--verify", "refs/heads/main"],
+            None
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn first_push_does_not_overwrite_remote_history() {
+    let (_dir, r) = fixture();
+    let target = TempDir::new().unwrap();
+    git(target.path(), &["init", "--bare", "-b", "main"]);
+    git(
+        &r.root,
+        &["remote", "add", "origin", target.path().to_str().unwrap()],
+    );
+    git(&r.root, &["push", "origin", "main"]);
+    let original = r.head_sha().unwrap();
+    git(&r.root, &["commit", "--amend", "-m", "different history"]);
+    assert!(r.network("push").is_err());
+    assert!(r.snapshot().unwrap().upstream.is_empty());
+    let tip =
+        String::from_utf8(run(target.path(), &["rev-parse", "refs/heads/main"], None).unwrap())
+            .unwrap();
+    assert_eq!(tip.trim(), original.trim());
 }

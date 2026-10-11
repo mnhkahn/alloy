@@ -636,7 +636,7 @@ impl Repository {
     }
     /// The single push URL of a remote; multiple push URLs are an error.
     pub fn push_url(&self, remote: &str) -> Result<String> {
-        let out = self.cmd(&["remote", "get-url", "--push", remote])?;
+        let out = self.cmd(&["remote", "get-url", "--push", "--all", remote])?;
         let mut lines = out.lines().map(str::trim).filter(|l| !l.is_empty());
         let url = lines
             .next()
@@ -905,6 +905,57 @@ impl Repository {
             .map_err(|e| format!("Commit succeeded, but publishing the index failed: {e}"))?;
         Ok(output)
     }
+    fn push(&self) -> Result<String> {
+        let branch = self
+            .cmd(&["symbolic-ref", "--quiet", "--short", "HEAD"])
+            .map_err(|_| "Cannot push from detached HEAD. Check out a branch first.".to_string())?;
+        let branch = branch.trim();
+        self.head_sha()
+            .map_err(|_| "Create a commit before pushing.".to_string())?;
+        let reference = format!("refs/heads/{branch}");
+        // Read configured tracking information even if its remote-tracking ref is missing.
+        let upstream = self.cmd(&["for-each-ref", "--format=%(upstream)", &reference])?;
+        if !upstream.trim().is_empty() {
+            return self.cmd(&["push"]);
+        }
+        let remotes = self.remotes()?;
+        let configured = [
+            format!("branch.{branch}.pushRemote"),
+            "remote.pushDefault".into(),
+            format!("branch.{branch}.remote"),
+        ]
+        .iter()
+        .find_map(|key| {
+            self.cmd(&["config", "--get", key])
+                .ok()
+                .map(|s| s.trim().to_string())
+        });
+        let remote = if let Some(remote) = configured {
+            if !remotes.contains(&remote) {
+                return Err(format!(
+                    "Configured push remote {remote:?} is not a named remote. Configure a push remote first."
+                ));
+            }
+            remote
+        } else if remotes.iter().any(|r| r == "origin") {
+            "origin".into()
+        } else if remotes.len() == 1 {
+            remotes[0].clone()
+        } else if remotes.is_empty() {
+            return Err("No remote configured. Add a remote before pushing.".into());
+        } else {
+            return Err(
+                "Multiple remotes and no origin. Set remote.pushDefault to choose a push remote."
+                    .into(),
+            );
+        };
+        self.push_url(&remote)?;
+        let refspec = format!("{reference}:{reference}");
+        let output = self.cmd(&["push", "--set-upstream", "--", &remote, &refspec])?;
+        Ok(format!(
+            "Pushed {branch} and set upstream to {remote}/{branch}.\n{output}"
+        ))
+    }
     pub fn network(&self, action: &str) -> Result<String> {
         match action {
             "fetch" => self.cmd(&["fetch", "--prune"]),
@@ -914,7 +965,7 @@ impl Repository {
                 }
                 self.cmd(&["pull", "--no-rebase", "--no-edit"])
             }
-            "push" => self.cmd(&["push"]),
+            "push" => self.push(),
             _ => Err("Unknown network action".into()),
         }
     }

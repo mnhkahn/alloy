@@ -385,7 +385,7 @@ fn confirmation(ctx) {
     if c == "tag" { return tag_bump_bar(ctx); }
     if c == "tag-go" { return tag_go_bar(ctx); }
     if c == "tag-retry" { return tag_retry_bar(ctx); }
-    let label = if c == "push" {"Push local commits to the configured upstream?"} else if c == "pull" {"Pull and merge changes from the configured upstream?"} else if c == "close" {"Close Alloy and discard unsaved work? An in-flight Git operation may still finish."} else if c == "delete" {"Delete this conflicted file and stage the deletion?"} else {"Discard your unsaved draft?"};
+    let label = if c == "push" {"Push local commits? If no upstream is configured, automatically set it on the selected push remote."} else if c == "pull" {"Pull and merge changes from the configured upstream?"} else if c == "close" {"Close Alloy and discard unsaved work? An in-flight Git operation may still finish."} else if c == "delete" {"Delete this conflicted file and stage the deletion?"} else {"Discard your unsaved draft?"};
     let handler = if c == "push" || c == "pull" {Fn("network_confirm")} else if c == "close" {Fn("close_now")} else if c == "delete" {Fn("delete_now")} else {Fn("discard_now")};
     row([text(label),button(ctx,"Confirm",handler,(),true),button(ctx,"Cancel",Fn("cancel"),(),true)])
         .with_style(style().padding(px(12)).gap(px(10)).items_center().background(theme_color("selection")))
