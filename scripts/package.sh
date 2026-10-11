@@ -14,6 +14,8 @@ else
 fi
 bundle="dist/Alloy.app"
 mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
+# Keep this developer build out of Spotlight; the installed app is the searchable copy.
+printf '' > "$(dirname "$bundle")/.metadata_never_index"
 cp "target/$profile/alloy" "$bundle/Contents/MacOS/Alloy.new"
 mv -f "$bundle/Contents/MacOS/Alloy.new" "$bundle/Contents/MacOS/Alloy"
 iconset="target/AppIcon.iconset"

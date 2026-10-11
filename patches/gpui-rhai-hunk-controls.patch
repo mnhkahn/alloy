@@ -1,5 +1,5 @@
 diff --git a/crates/gpui-rhai/src/document_view.rs b/crates/gpui-rhai/src/document_view.rs
-index bd857a0..aed60e9 100644
+index bd857a0..98ad7d1 100644
 --- a/crates/gpui-rhai/src/document_view.rs
 +++ b/crates/gpui-rhai/src/document_view.rs
 @@ -23,7 +23,7 @@ use crate::text_input::{
@@ -30,7 +30,48 @@ index bd857a0..aed60e9 100644
      left: DocumentDescriptor,
      right: DocumentDescriptor,
      mode: DiffViewMode,
-@@ -3256,6 +3266,91 @@ fn diff_aligned_for_line(diff: &PreparedDiff, side: DocumentSide, line: usize) -
+@@ -2016,8 +2026,7 @@ struct DiffViewerEntity {
+     document_runtime: DocumentRuntimeConfig,
+     focus: FocusHandle,
+     scroll: gpui::UniformListScrollHandle,
+-    left_horizontal: ScrollHandle,
+-    right_horizontal: ScrollHandle,
++    horizontal: ScrollHandle,
+     prepared: Option<Arc<PreparedDiff>>,
+     display: Arc<[DiffRenderRow]>,
+     display_columns: Option<usize>,
+@@ -2090,8 +2099,7 @@ impl DiffViewerEntity {
+             document_runtime,
+             focus: cx.focus_handle(),
+             scroll: gpui::UniformListScrollHandle::new(),
+-            left_horizontal: ScrollHandle::new(),
+-            right_horizontal: ScrollHandle::new(),
++            horizontal: ScrollHandle::new(),
+             prepared: None,
+             display: Arc::from([]),
+             display_columns: None,
+@@ -2864,8 +2872,7 @@ impl DiffViewerEntity {
+         let events = self.events.clone();
+         let focus = self.focus.clone();
+         let weak = cx.entity().downgrade();
+-        let left_horizontal = self.left_horizontal.clone();
+-        let right_horizontal = self.right_horizontal.clone();
++        let horizontal = self.horizontal.clone();
+         let disabled = self.loading;
+         let list = uniform_list(
+             "gpui-rhai-diff-viewer-lines",
+@@ -2885,8 +2892,8 @@ impl DiffViewerEntity {
+                             &events,
+                             &focus,
+                             &weak,
+-                            &left_horizontal,
+-                            &right_horizontal,
++                            &horizontal,
++                            &horizontal,
+                             disabled,
+                         ))
+                     })
+@@ -3256,6 +3263,91 @@ fn diff_aligned_for_line(diff: &PreparedDiff, side: DocumentSide, line: usize) -
      })
  }
  
@@ -122,7 +163,7 @@ index bd857a0..aed60e9 100644
  #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
  fn diff_line_element(
      diff: &Arc<PreparedDiff>,
-@@ -3348,6 +3443,19 @@ fn diff_line_element(
+@@ -3348,6 +3440,19 @@ fn diff_line_element(
                  Some(right_horizontal),
                  disabled,
              );
@@ -142,7 +183,7 @@ index bd857a0..aed60e9 100644
              crate::renderer::apply_style_override(
                  div()
                      .w_full()
-@@ -3363,7 +3471,7 @@ fn diff_line_element(
+@@ -3363,7 +3468,7 @@ fn diff_line_element(
                              .border_color(rgba(
                                  theme_color(theme, "border", 0x353b_48ff).as_rgba_hex(),
                              ))
@@ -151,7 +192,7 @@ index bd857a0..aed60e9 100644
                      ),
                  &config.line_style,
                  theme,
-@@ -3384,8 +3492,18 @@ fn diff_line_element(
+@@ -3384,8 +3489,18 @@ fn diff_line_element(
              } else {
                  &aligned_row.right_inline
              };
@@ -171,7 +212,7 @@ index bd857a0..aed60e9 100644
                      if *side == DocumentSide::Left {
                          &diff.left
                      } else {
-@@ -3404,7 +3522,7 @@ fn diff_line_element(
+@@ -3404,7 +3519,7 @@ fn diff_line_element(
                      focus,
                      None,
                      disabled,
@@ -180,7 +221,7 @@ index bd857a0..aed60e9 100644
                  &config.line_style,
                  theme,
                  theme.direction(),
-@@ -3771,7 +3889,31 @@ fn parse_diff_config(
+@@ -3771,7 +3886,31 @@ fn parse_diff_config(
          Some("column") => DocumentWrap::Column(props.usize("wrap_column").unwrap_or(100)),
          Some(other) => return Err(format!("unknown DiffViewer wrap mode `{other}`")),
      };
@@ -212,7 +253,7 @@ index bd857a0..aed60e9 100644
          left: descriptor("left")?,
          right: descriptor("right")?,
          mode,
-@@ -3911,16 +4053,36 @@ pub fn diff_viewer_primitive_descriptor() -> PrimitiveDescriptor {
+@@ -3911,16 +4050,36 @@ pub fn diff_viewer_primitive_descriptor() -> PrimitiveDescriptor {
              ObjectField::optional(ValueSchema::optional(ValueSchema::Callback)),
          ),
      ]);
@@ -255,7 +296,7 @@ index bd857a0..aed60e9 100644
          state: crate::ComponentStateSchema::default(),
          lifecycle: true,
          effect: None,
-@@ -3931,6 +4093,44 @@ pub fn diff_viewer_primitive_descriptor() -> PrimitiveDescriptor {
+@@ -3931,6 +4090,44 @@ pub fn diff_viewer_primitive_descriptor() -> PrimitiveDescriptor {
  mod tests {
      use super::*;
  

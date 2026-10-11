@@ -391,10 +391,12 @@ fn editor(ctx,d) {
         textarea::Textarea(#{ key:`editor-${d.path}-${ctx.get_state("focus_editor_id")}`, autofocus:ctx.get_state("focus_editor_id")>0, label:"Editable file content", value:ctx.get_state("draft"), rows:15, on_change:Fn("draft_change"), disabled:ctx.get_state("busy") || ctx.get_state("selecting"), part_styles:#{editor:style().font_family("Menlo").font_size(px(12))} })
     ]).with_style(style().gap(px(4)).padding(px(6)).background(theme_color("surface_raised")))
 }
-fn tag_bar_style() { style().padding(px(12)).gap(px(10)).items_center().background(theme_color("selection")) }
+fn tag_bar_style() { style().width(relative(1)).padding_x(px(8)).padding_y(px(4)).gap(px(6)).items_center().overflow_x_scroll().background(theme_color("selection")) }
 fn tag_bump_bar(ctx) {
     let t = ctx.get_state("tag"); if t == () { return row([]); }
-    row([text(`Tag ${t.branch} @ ${t.head_short} · ${t.summary} · base ${t.base}`),
+    row([text(`Tag ${t.branch} @ ${t.head_short}`).with_style(style().max_width(px(190)).min_width(px(0)).text_ellipsis().overflow_hidden()),
+        text(t.summary).with_style(style().max_width(px(280)).min_width(px(0)).text_ellipsis().overflow_hidden().text_color(theme_color("text_muted"))),
+        small(`base ${t.base}`),
         button(ctx,`s → ${t.versions.s}`,Fn("tag_choose"),"s",true),
         button(ctx,`m → ${t.versions.m}`,Fn("tag_choose"),"m",true),
         button(ctx,`l → ${t.versions.l}`,Fn("tag_choose"),"l",true),
