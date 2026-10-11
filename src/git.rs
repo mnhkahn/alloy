@@ -30,7 +30,9 @@ fn run_index(
         stdin.write_all(bytes).map_err(err)?;
     }
     stdin.rewind().map_err(err)?;
-    let mut child = Command::new("git")
+    let mut command = Command::new("git");
+    crate::git_proxy::apply(&mut command, args);
+    let mut child = command
         .current_dir(dir)
         .args([
             "--no-pager",
@@ -663,7 +665,7 @@ impl Repository {
             None,
             None,
             30,
-        )?)?;
+        ).map_err(|error| format!("Cannot read remote tags (git ls-remote). Check network/proxy and Git authentication, then retry Tag. No tag was created. {error}"))?)?;
         let mut tags = std::collections::BTreeSet::new();
         for line in out.lines() {
             if let Some((_, reference)) = line.split_once('\t')

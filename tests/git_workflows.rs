@@ -760,6 +760,10 @@ fn tag_create_and_push_roundtrip() {
         &["remote", "add", "origin", bare.path().to_str().unwrap()],
     );
     let p = alloy::tag::prepare(&r).unwrap();
+    assert_eq!(p.base, "v0.0.0");
+    assert_eq!(p.versions["s"], "v0.0.1");
+    assert_eq!(p.versions["m"], "v0.1.0");
+    assert_eq!(p.versions["l"], "v1.0.0");
     assert_eq!(p.remote, "origin");
     assert!(!p.push_url.is_empty());
     let out =

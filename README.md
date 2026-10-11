@@ -77,3 +77,7 @@ Toolbar shortcuts (also printed on the buttons): Refresh `⌘⌥Y`, Fetch `⌘�
 Commit and push the workflow and packaging scripts first. Pushing a stable version tag (`v1.2.3`, `V1.2.3` or `1.2.3`) triggers packaging and creates a Release with generated notes if needed. Publishing a Release manually also triggers packaging. For retries, use **Actions → Release macOS packages → Run workflow** and enter an existing tag. Reruns replace that tag's assets. No extra token is needed: publishing uses the workflow's `GITHUB_TOKEN` with `contents: write`.
 
 The app's bundle version comes from the tag. Local packaging defaults to the Cargo version, or accepts an override: `sh scripts/package.sh release v1.2.3`. Assets are named `Alloy-1.2.3-macOS-arm64.zip` and `Alloy-1.2.3-macOS-x86_64.zip`. The bundled app uses an ad-hoc signature; Developer ID signing and Apple notarization are not configured.
+
+Git network operations use macOS manual HTTP/HTTPS system proxies when no explicit proxy environment variable is set. Git proxy configuration continues to take precedence. Automatic proxy scripts (PAC) are not evaluated. An empty remote tag list starts version selection at `v0.0.0`; a failed remote lookup blocks tagging and reports a network/authentication error.
+
+Diff views hide unchanged sections by default, keeping three context lines around each change. Use **Show all lines / Hide unchanged** in the diff toolbar to toggle the full file; click an “unchanged lines” separator to expand one folded section. This changes only the display, not staging or file contents.

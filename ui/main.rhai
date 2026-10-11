@@ -9,7 +9,7 @@ fn bool_field(value) { #{ schema: #{ type: "bool" }, "default": #{ type: "bool",
 fn state_schema() { #{ fields: #{
     root: string_field(""), url: string_field(""), filter: string_field(""), message: string_field("Opening Alloy…"), commit: string_field(""),
     draft: string_field(""), mode: string_field("split"), tab: string_field("work"), confirm: string_field(""),
-    mode_open: bool_field(false), whitespace_open: bool_field(false), whitespace: string_field("exact"),
+    hide_unchanged: bool_field(true), mode_open: bool_field(false), whitespace_open: bool_field(false), whitespace: string_field("exact"),
     open_tabs: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
     projects_open: bool_field(false), projects_loading: bool_field(false), add_project: bool_field(false),
     projects: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
@@ -246,6 +246,7 @@ fn document_tabs(ctx,d) {
     }
     row(tabs).with_key("document-tabs").with_style(style().height(px(38)).flex_shrink(false).overflow_x_scroll().background(theme_color("surface")))
 }
+fn toggle_unchanged(ctx, payload) { ctx.set_state("hide_unchanged", !ctx.get_state("hide_unchanged")); }
 fn set_mode(ctx, value) { if value != () {ctx.set_state("mode", value);} ctx.set_state("mode_open",false); }
 fn edit(ctx, payload) { ctx.set_state("editor", !ctx.get_state("editor")); }
 fn base_toggle(ctx, payload) { ctx.set_state("base_view", !ctx.get_state("base_view")); }
@@ -347,7 +348,7 @@ fn image_pane(ctx, key, preview, label, single) {
     column(nodes).with_style(style().flex_basis(px(0)).flex_grow().min_width(px(0)).min_height(px(0)))
 }
 fn viewer(ctx,key,left,right,left_label,right_label,file,mode) {
-    diff::DiffViewer(#{key:key,left:#{source:left,label:left_label,file_name:file},right:#{source:right,label:right_label,file_name:file},mode:mode,context_lines:"all",whitespace:ctx.get_state("whitespace"),hunk_controls:hunk_controls(ctx),show_hunk_controls:ctx.get_state("doc") != () && !ctx.get_state("doc").conflict && !ctx.get_state("doc").staged,on_hunk_action:Fn("hunk_action")})
+    diff::DiffViewer(#{key:`${key}-${ctx.get_state("hide_unchanged")}`,left:#{source:left,label:left_label,file_name:file},right:#{source:right,label:right_label,file_name:file},mode:mode,context_lines:if ctx.get_state("hide_unchanged") {3} else {"all"},whitespace:ctx.get_state("whitespace"),hunk_controls:hunk_controls(ctx),show_hunk_controls:ctx.get_state("doc") != () && !ctx.get_state("doc").conflict && !ctx.get_state("doc").staged,on_hunk_action:Fn("hunk_action")})
         .tab_index(0).with_style(style().flex_grow().min_height(px(0)).min_width(px(0)))
 }
 fn editor(ctx,d) {
@@ -457,6 +458,7 @@ fn content(ctx) {
         select::Select(#{key:"viewer-mode",label:"Diff layout",options:[#{value:"split",label:"Side-by-side viewer"},#{value:"unified",label:"Unified viewer"}],value:ctx.get_state("mode"),open:ctx.get_state("mode_open"),query:"",empty_text:"No options",size:"xs",width:px(176),on_change:Fn("set_mode"),on_open_change:Fn("mode_open")}),
         select::Select(#{key:"whitespace",label:"Whitespace comparison",options:[#{value:"exact",label:"Do not ignore"},#{value:"ignore_changes",label:"Ignore changes"},#{value:"ignore_all",label:"Ignore all spaces"}],value:ctx.get_state("whitespace"),open:ctx.get_state("whitespace_open"),query:"",empty_text:"No options",size:"xs",width:px(156),on_change:Fn("whitespace_change"),on_open_change:Fn("whitespace_open")})
     ];
+    toolbar.push(button(ctx,if ctx.get_state("hide_unchanged") {"Show all lines"} else {"Hide unchanged"},Fn("toggle_unchanged"),(),true));
     if d.images != () { toolbar = [button(ctx,"←",Fn("previous_file"),(),true),button(ctx,"→",Fn("next_file"),(),true),small("Image preview"),button(ctx,if ctx.get_state("image_actual") {"Reduced size"} else {"Actual size (100%)"},Fn("image_zoom"),(),true)]; }
     if dirty(ctx) { toolbar.push(button(ctx,"Save ⌘S",Fn("save"),(),d.editable)); toolbar.push(button(ctx,"Discard",Fn("discard"),(),true)); }
     if ctx.get_state("advanced") {
