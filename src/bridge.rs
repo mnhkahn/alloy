@@ -21,18 +21,31 @@ struct Handler {
 impl ScriptViewExtension for GitExtension {
     fn configure_runtime(&self, runtime: &mut UiRuntimeState) -> Result<(), String> {
         runtime
+            .assets
+            .register("preview", PreviewAssets)
+            .map_err(|e| e.to_string())?;
+        runtime
             .capabilities
             .register(
                 CapabilityDescriptor {
                     id: CapabilityId::parse("alloy.boot").map_err(|e| e.to_string())?,
                     version: semver::Version::new(1, 0, 0),
-                    methods: BTreeMap::from([(
-                        "state".into(),
-                        CapabilityMethod {
-                            input: ValueSchema::Null,
-                            output: ValueSchema::UiValue,
-                        },
-                    )]),
+                    methods: BTreeMap::from([
+                        (
+                            "shortcuts".into(),
+                            CapabilityMethod {
+                                input: ValueSchema::Null,
+                                output: ValueSchema::UiValue,
+                            },
+                        ),
+                        (
+                            "state".into(),
+                            CapabilityMethod {
+                                input: ValueSchema::Null,
+                                output: ValueSchema::UiValue,
+                            },
+                        ),
+                    ]),
                 },
                 Boot(self.fixture.clone().unwrap_or(Value::Null)),
             )
@@ -69,6 +82,9 @@ impl AsyncCapabilityHandler for Handler {
             let _guard = gate.lock().map_err(|e| e.to_string())?;
             let output = match execute(&data, &initial) {
                 Ok(value) => value,
+                Err(error) if string(&data, "op") == "select" => {
+                    json!({"ok":false,"message":error,"snapshot":null,"document":null,"selection_id":data["selection_id"]})
+                }
                 Err(error) => {
                     let repo = Repository::open(string(&data, "root")).ok();
                     let snapshot = repo.as_ref().and_then(|r| r.snapshot().ok());
@@ -78,7 +94,7 @@ impl AsyncCapabilityHandler for Handler {
                             .find(|f| f.conflict)
                             .or_else(|| s.files.iter().find(|f| f.path == string(&data, "path")))
                             .or_else(|| s.files.first())
-                            .and_then(|f| r.document(&f.path, false).ok())
+                            .and_then(|f| r.comparison_for_entry(f, false, true).ok())
                     });
                     json!({ "ok": false, "message": error, "snapshot": snapshot, "document": document })
                 }
@@ -96,6 +112,20 @@ fn flag(v: &Value, key: &str) -> bool {
 fn execute(data: &Value, initial: &str) -> Result<Value, String> {
     let op = string(data, "op");
     let path = string(data, "path");
+    if op == "projects" {
+        let projects = alloy::projects::Projects::read(&alloy::projects::store_path()?)?;
+        return Ok(json!({"projects":projects.overview()}));
+    }
+    let remembered = if op == "bootstrap" && initial.is_empty() {
+        alloy::projects::Projects::read(&alloy::projects::store_path()?)?
+            .roots
+            .first()
+            .cloned()
+            .unwrap_or_default()
+    } else {
+        initial.to_owned()
+    };
+    let initial = remembered.as_str();
     if op == "bootstrap" && initial.is_empty() {
         return Ok(
             json!({"ok":true,"message":"Open a local repository or clone one to begin.","snapshot":null,"document":null}),
@@ -138,9 +168,16 @@ fn execute(data: &Value, initial: &str) -> Result<Value, String> {
         }
         _ => Repository::open(string(data, "root"))?,
     };
+    if op == "select" {
+        let document =
+            repo.selected_comparison(path, string(data, "old_path"), flag(data, "staged"), true)?;
+        return Ok(
+            json!({"ok":true,"message":path,"snapshot":null,"document":document,"selection_id":data["selection_id"]}),
+        );
+    }
     let mut message = "Repository refreshed".to_string();
     match op {
-        "bootstrap" | "open" | "clone" | "browse" | "refresh" | "select" => (),
+        "bootstrap" | "open" | "clone" | "browse" | "refresh" => (),
         "save" => {
             repo.save(
                 path,
@@ -171,8 +208,62 @@ fn execute(data: &Value, initial: &str) -> Result<Value, String> {
             repo.resolve_delete(path, string(data, "expected"), flag(data, "exists"))?;
             message = "Deletion staged as conflict resolution".into();
         }
+        "commit_selected" => {
+            let paths: Vec<String> =
+                serde_json::from_value(data["paths"].clone()).map_err(|e| e.to_string())?;
+            let partial = if data["partial"].is_object() {
+                serde_json::from_value(data["partial"].clone()).map_err(|e| e.to_string())?
+            } else {
+                BTreeMap::new()
+            };
+            message = repo.commit_parts(string(data, "message"), &paths, &partial)?;
+        }
         "commit" => {
             message = repo.commit(string(data, "message"))?;
+        }
+        "ai_commit" => {
+            message = alloy::cmsg::generate_and_commit(&repo)?;
+        }
+        "tag_prepare" => {
+            let preview = alloy::tag::prepare(&repo)?;
+            return Ok(
+                json!({"ok":true,"message":format!("Tag base {}; pick s/m/l", preview.base),"tag_preview":preview,"snapshot":null,"document":null}),
+            );
+        }
+        "tag_create" | "tag_push" => {
+            let outcome = if op == "tag_create" {
+                alloy::tag::create(
+                    &repo,
+                    string(data, "version"),
+                    string(data, "head"),
+                    flag(data, "push"),
+                    string(data, "remote"),
+                    string(data, "push_url"),
+                )
+            } else {
+                alloy::tag::retry_push(
+                    &repo,
+                    string(data, "version"),
+                    string(data, "commit"),
+                    string(data, "remote"),
+                    string(data, "push_url"),
+                )
+            };
+            match outcome {
+                Ok(done) => message = done,
+                Err(alloy::tag::TagError::Plain(error)) => return Err(error),
+                Err(alloy::tag::TagError::PushFailed {
+                    message: error,
+                    version,
+                    commit,
+                    remote,
+                    push_url,
+                }) => {
+                    return Ok(
+                        json!({"ok":false,"message":error,"snapshot":repo.snapshot()?,"document":null,"tag_retry":{"version":version,"commit":commit,"remote":remote,"push_url":push_url}}),
+                    );
+                }
+            }
         }
         "fetch" | "pull" | "push" => {
             message = repo.network(op)?;
@@ -189,10 +280,30 @@ fn execute(data: &Value, initial: &str) -> Result<Value, String> {
         .find(|f| f.path == path)
         .or_else(|| snapshot.files.first());
     let document = match selected {
-        Some(file) => Some(repo.document(&file.path, flag(data, "staged") && !file.conflict)?),
+        Some(file) => Some(repo.comparison_for_entry(file, flag(data, "staged"), true)?),
         None => None,
     };
-    Ok(json!({"ok":true,"message":message,"snapshot":snapshot,"document":document}))
+    let mut result = json!({"ok":true,"message":message,"snapshot":snapshot,"document":document,"overview":alloy::projects::Overview::from_snapshot(&snapshot)});
+    if op == "ai_commit" {
+        result["committed"] = json!(true);
+    }
+    if matches!(op, "tag_create" | "tag_push") {
+        result["tagged"] = json!(true);
+    }
+    if matches!(op, "bootstrap" | "open" | "browse" | "clone") {
+        let saved = (|| -> Result<(), String> {
+            let path = alloy::projects::store_path()?;
+            let mut projects = alloy::projects::Projects::read(&path)?;
+            projects.remember(&snapshot.root);
+            projects.save(&path)
+        })();
+        if let Err(error) = saved {
+            result["message"] = json!(format!(
+                "Opened repository; could not save project history: {error}"
+            ));
+        }
+    }
+    Ok(result)
 }
 fn to_ui(value: Value) -> UiValue {
     match value {
@@ -219,7 +330,19 @@ fn from_ui(value: UiValue) -> Value {
 
 struct Boot(Value);
 impl CapabilityHandler for Boot {
-    fn call(&mut self, _: &str, _: UiValue) -> Result<UiValue, String> {
-        Ok(to_ui(self.0.clone()))
+    fn call(&mut self, method: &str, _: UiValue) -> Result<UiValue, String> {
+        Ok(to_ui(if method == "shortcuts" {
+            crate::shortcuts::catalog()
+        } else {
+            self.0.clone()
+        }))
+    }
+}
+
+struct PreviewAssets;
+impl gpui_rhai::AssetProvider for PreviewAssets {
+    fn load(&self, name: &str) -> Result<gpui_rhai::AssetData, String> {
+        let (mime_type, bytes) = alloy::preview::load_asset(name)?;
+        Ok(gpui_rhai::AssetData { mime_type, bytes })
     }
 }

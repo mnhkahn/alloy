@@ -1,0 +1,339 @@
+diff --git a/crates/gpui-rhai/src/document_view.rs b/crates/gpui-rhai/src/document_view.rs
+index bd857a0..aed60e9 100644
+--- a/crates/gpui-rhai/src/document_view.rs
++++ b/crates/gpui-rhai/src/document_view.rs
+@@ -23,7 +23,7 @@ use crate::text_input::{
+     NativeTypography, TextInputCallbacks, TextInputConfig, TextInputEntity, native_typography,
+ };
+ use crate::{
+-    DiffDisplayRow, DiffRowKind, DiffViewMode, DiffWhitespace, DocumentDescriptor,
++    DiffAlignedRow, DiffDisplayRow, DiffRowKind, DiffViewMode, DiffWhitespace, DocumentDescriptor,
+     DocumentRuntimeConfig, DocumentSource, DocumentWrap, EventSchema, ObjectField, PreparedDiff,
+     PreparedDocument, PrimitiveContext, PrimitiveDescriptor, PrimitiveHandler, PrimitiveId,
+     PrimitiveInstance, PrimitiveInstanceId, PrimitiveProps, PrimitiveTheme, PrimitiveValue, Style,
+@@ -1911,8 +1911,18 @@ pub fn code_viewer_primitive_descriptor() -> PrimitiveDescriptor {
+     }
+ }
+ 
++#[derive(Clone, Debug, PartialEq)]
++struct HunkControl {
++    index: usize,
++    old_start: usize,
++    new_start: usize,
++    checked: bool,
++}
++
+ #[derive(Clone, Debug, PartialEq)]
+ struct DiffViewerConfig {
++    hunk_controls: Vec<HunkControl>,
++    show_hunk_controls: bool,
+     left: DocumentDescriptor,
+     right: DocumentDescriptor,
+     mode: DiffViewMode,
+@@ -3256,6 +3266,91 @@ fn diff_aligned_for_line(diff: &PreparedDiff, side: DocumentSide, line: usize) -
+     })
+ }
+ 
++// Controls share the exact row layout/virtual scroll as the source text.
++// Coordinates come from the consumer's canonical patch model, not display hunk IDs.
++fn hunk_control_for_row<'a>(
++    controls: &'a [HunkControl],
++    row: &DiffAlignedRow,
++) -> Option<&'a HunkControl> {
++    if row.kind == DiffRowKind::Equal {
++        return None;
++    }
++    controls.iter().find(|control| match (row.left, row.right) {
++        (Some(left), Some(right)) => left == control.old_start && right == control.new_start,
++        (Some(left), None) => left == control.old_start,
++        (None, Some(right)) => right == control.new_start,
++        _ => false,
++    })
++}
++
++fn hunk_gutter(
++    control: Option<&HunkControl>,
++    config: &DiffViewerConfig,
++    events: &PrimitiveContext,
++    disabled: bool,
++) -> AnyElement {
++    let mut gutter = div()
++        .w(px(48.0))
++        .flex_shrink_0()
++        .h_full()
++        .flex()
++        .items_center()
++        .gap(px(4.0))
++        .px(px(3.0));
++    if let Some(control) = control {
++        for (action, label) in [
++            ("restore", "»"),
++            ("toggle", if control.checked { "✓" } else { "" }),
++        ] {
++            let events = events.clone();
++            let left = config.left.source.text();
++            let right = config.right.source.text();
++            let path = config.right.file_name.clone().unwrap_or_default();
++            let index = control.index;
++            let mut button = div()
++                .id(SharedString::from(format!(
++                    "hunk-{}-{action}",
++                    control.index
++                )))
++                .w(px(18.0))
++                .h(px(18.0))
++                .flex_shrink_0()
++                .flex()
++                .items_center()
++                .justify_center()
++                .text_size(px(14.0))
++                .text_color(rgba(0xc9d1d9ff))
++                .rounded(px(2.0))
++                .child(label);
++            if action == "toggle" {
++                button = button.border_1().border_color(rgba(0x9099a6ff));
++            }
++            if !disabled {
++                button = button
++                    .cursor_pointer()
++                    .hover(|s| s.bg(rgba(0x45556fff)))
++                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
++                    .on_click(move |_, window, cx| {
++                        cx.stop_propagation();
++                        let events = events.clone();
++                        let payload = UiValue::Map(BTreeMap::from([
++                            ("action".into(), UiValue::String(action.into())),
++                            ("index".into(), UiValue::Integer(index as i64)),
++                            ("path".into(), UiValue::String(path.clone())),
++                            ("left".into(), UiValue::String(left.to_string())),
++                            ("right".into(), UiValue::String(right.to_string())),
++                        ]));
++                        window.defer(cx, move |window, cx| {
++                            let _ = events.emit("hunk_action", payload, window, cx);
++                        });
++                    });
++            }
++            gutter = gutter.child(button);
++        }
++    }
++    gutter.into_any_element()
++}
++
+ #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+ fn diff_line_element(
+     diff: &Arc<PreparedDiff>,
+@@ -3348,6 +3443,19 @@ fn diff_line_element(
+                 Some(right_horizontal),
+                 disabled,
+             );
++            let first_segment =
++                left.as_ref().is_some_and(|s| s.first) || right.as_ref().is_some_and(|s| s.first);
++            let control = if first_segment {
++                hunk_control_for_row(&config.hunk_controls, aligned_row)
++            } else {
++                None
++            };
++            let mut right_pane = div().flex().h_full().w_full();
++            if config.show_hunk_controls {
++                right_pane = right_pane.child(hunk_gutter(control, config, events, disabled));
++            }
++            let right_pane =
++                right_pane.child(div().flex_1().min_w(px(0.0)).h_full().child(right_cell));
+             crate::renderer::apply_style_override(
+                 div()
+                     .w_full()
+@@ -3363,7 +3471,7 @@ fn diff_line_element(
+                             .border_color(rgba(
+                                 theme_color(theme, "border", 0x353b_48ff).as_rgba_hex(),
+                             ))
+-                            .child(right_cell),
++                            .child(right_pane),
+                     ),
+                 &config.line_style,
+                 theme,
+@@ -3384,8 +3492,18 @@ fn diff_line_element(
+             } else {
+                 &aligned_row.right_inline
+             };
++            let control =
++                if segment.first && (*side == DocumentSide::Right || aligned_row.right.is_none()) {
++                    hunk_control_for_row(&config.hunk_controls, aligned_row)
++                } else {
++                    None
++                };
++            let mut line = div().w_full().h(px(line_height)).flex();
++            if config.show_hunk_controls {
++                line = line.child(hunk_gutter(control, config, events, disabled));
++            }
+             crate::renderer::apply_style_override(
+-                div().w_full().h(px(line_height)).child(diff_cell(
++                line.child(div().flex_1().min_w(px(0.0)).h_full().child(diff_cell(
+                     if *side == DocumentSide::Left {
+                         &diff.left
+                     } else {
+@@ -3404,7 +3522,7 @@ fn diff_line_element(
+                     focus,
+                     None,
+                     disabled,
+-                )),
++                ))),
+                 &config.line_style,
+                 theme,
+                 theme.direction(),
+@@ -3771,7 +3889,31 @@ fn parse_diff_config(
+         Some("column") => DocumentWrap::Column(props.usize("wrap_column").unwrap_or(100)),
+         Some(other) => return Err(format!("unknown DiffViewer wrap mode `{other}`")),
+     };
++    let mut hunk_controls = Vec::new();
++    if let Some(UiValue::Array(items)) = props.data("hunk_controls") {
++        for item in items {
++            let UiValue::Map(fields) = item else {
++                return Err("invalid hunk control".into());
++            };
++            let number = |name: &str| -> Result<usize, String> {
++                match fields.get(name) {
++                    Some(UiValue::Integer(value)) => {
++                        usize::try_from(*value).map_err(|_| "negative hunk coordinate".into())
++                    }
++                    _ => Err("missing hunk coordinate".into()),
++                }
++            };
++            hunk_controls.push(HunkControl {
++                index: number("index")?,
++                old_start: number("old_start")?,
++                new_start: number("new_start")?,
++                checked: fields.get("checked") == Some(&UiValue::Bool(true)),
++            });
++        }
++    }
+     Ok(DiffViewerConfig {
++        hunk_controls,
++        show_hunk_controls: props.boolean("show_hunk_controls").unwrap_or(false),
+         left: descriptor("left")?,
+         right: descriptor("right")?,
+         mode,
+@@ -3911,16 +4053,36 @@ pub fn diff_viewer_primitive_descriptor() -> PrimitiveDescriptor {
+             ObjectField::optional(ValueSchema::optional(ValueSchema::Callback)),
+         ),
+     ]);
++    props.insert(
++        "hunk_controls".into(),
++        ObjectField::optional(ValueSchema::UiValue),
++    );
++    props.insert(
++        "show_hunk_controls".into(),
++        ObjectField::optional(ValueSchema::Bool),
++    );
++    props.insert(
++        "on_hunk_action".into(),
++        ObjectField::optional(ValueSchema::optional(ValueSchema::Callback)),
++    );
+     PrimitiveDescriptor {
+         id: PrimitiveId::parse("gpui_rhai.diff_viewer").expect("static primitive ID"),
+         export: "DiffViewPrimitive".to_owned(),
+         props,
+-        events: BTreeMap::from([(
+-            "location_activate".to_owned(),
+-            EventSchema {
+-                payload: location_schema(true),
+-            },
+-        )]),
++        events: BTreeMap::from([
++            (
++                "hunk_action".into(),
++                EventSchema {
++                    payload: ValueSchema::UiValue,
++                },
++            ),
++            (
++                "location_activate".to_owned(),
++                EventSchema {
++                    payload: location_schema(true),
++                },
++            ),
++        ]),
+         state: crate::ComponentStateSchema::default(),
+         lifecycle: true,
+         effect: None,
+@@ -3931,6 +4093,44 @@ pub fn diff_viewer_primitive_descriptor() -> PrimitiveDescriptor {
+ mod tests {
+     use super::*;
+ 
++    #[test]
++    fn hunk_controls_anchor_to_consumer_coordinates() {
++        let controls = vec![HunkControl {
++            index: 7,
++            old_start: 2,
++            new_start: 3,
++            checked: true,
++        }];
++        let mut row = DiffAlignedRow {
++            left: Some(2),
++            right: Some(3),
++            kind: DiffRowKind::Modified,
++            hunk: Some(99),
++            left_inline: vec![],
++            right_inline: vec![],
++        };
++        assert_eq!(hunk_control_for_row(&controls, &row).unwrap().index, 7);
++        row.right = Some(4);
++        assert!(hunk_control_for_row(&controls, &row).is_none());
++        row.kind = DiffRowKind::LeftOnly;
++        row.right = None;
++        assert!(hunk_control_for_row(&controls, &row).is_some());
++        row.kind = DiffRowKind::RightOnly;
++        row.left = None;
++        row.right = Some(3);
++        assert!(hunk_control_for_row(&controls, &row).is_some());
++        row.kind = DiffRowKind::Equal;
++        assert!(hunk_control_for_row(&controls, &row).is_none());
++    }
++
++    #[test]
++    fn hunk_controls_expose_an_opt_in_callback() {
++        let descriptor = diff_viewer_primitive_descriptor();
++        assert!(descriptor.props.contains_key("hunk_controls"));
++        assert!(descriptor.props.contains_key("on_hunk_action"));
++        assert!(descriptor.events.contains_key("hunk_action"));
++    }
++
+     #[test]
+     fn document_selection_copies_original_cross_line_text() {
+         let source: Arc<str> = Arc::from("one\ntwo\nthree");
+diff --git a/registry/components/diff_viewer.rhai b/registry/components/diff_viewer.rhai
+index 24cabe1..e0da6a2 100644
+--- a/registry/components/diff_viewer.rhai
++++ b/registry/components/diff_viewer.rhai
+@@ -47,10 +47,13 @@ define_component(#{
+                 "default": #{ type: "integer", value: 100 } },
+             tab_size: #{ schema: #{ type: "integer", min: 1, max: 16 }, required: false, sensitive: false,
+                 "default": #{ type: "integer", value: 4 } },
++            hunk_controls: #{ schema: #{ type: "ui_value" }, required: false, sensitive: false },
++            show_hunk_controls: #{ schema: #{ type: "bool" }, required: false, sensitive: false },
++            on_hunk_action: #{ schema: #{ type: "optional", value: #{ type: "callback" } }, required: false, sensitive: false },
+             on_location_activate: #{ schema: #{ type: "optional", value: #{ type: "callback" } }, required: false, sensitive: false },
+         },
+         state: #{ fields: #{} },
+-        events: #{ location_activate: #{ payload: #{ type: "object", allow_unknown: false, fields: #{
++        events: #{ hunk_action: #{ payload: #{ type:"ui_value" } }, location_activate: #{ payload: #{ type: "object", allow_unknown: false, fields: #{
+             side: #{ schema: #{ type: "string", allowed: ["left", "right"] }, required: true, sensitive: false },
+             line: #{ schema: #{ type: "integer", min: 1 }, required: true, sensitive: false },
+             column: #{ schema: #{ type: "integer", min: 1 }, required: true, sensitive: false },
+@@ -63,6 +66,7 @@ define_component(#{
+ fn DiffViewer(props) { render_component("components/diff_viewer", props) }
+ fn prop_or(props, name, fallback) { if name in props { props[name] } else { fallback } }
+ fn side_or(side, name, fallback) { if name in side && side[name] != () { side[name] } else { fallback } }
++fn hunk_action(ctx, payload) { ctx.emit("hunk_action", payload); }
+ fn location_activate(ctx, payload) { ctx.emit("location_activate", payload); }
+ 
+ fn render_DiffViewer(ctx, props) {
+@@ -72,6 +76,9 @@ fn render_DiffViewer(ctx, props) {
+         .width(relative(1.0)).height(relative(1.0)).min_width(px(0)).min_height(px(0))
+         .background(theme_color("surface")).border(px(1)).border_color(theme_color("border")));
+     gpui_rhai::DiffViewPrimitive(#{
++        hunk_controls: prop_or(props,"hunk_controls",[]),
++        show_hunk_controls: prop_or(props,"show_hunk_controls",false),
++        on_hunk_action: if "on_hunk_action" in props && props.on_hunk_action != () { Fn("hunk_action") } else { () },
+         key: props.key,
+         left_source: left.source,
+         left_label: left.label,

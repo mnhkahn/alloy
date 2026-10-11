@@ -14,6 +14,15 @@ type Result<T> = std::result::Result<T, String>;
 const MAX_TEXT: usize = 750_000;
 
 pub fn run(dir: &Path, args: &[&str], input: Option<&[u8]>) -> Result<Vec<u8>> {
+    run_index(dir, args, input, None, 120)
+}
+fn run_index(
+    dir: &Path,
+    args: &[&str],
+    input: Option<&[u8]>,
+    index: Option<&Path>,
+    timeout_secs: u64,
+) -> Result<Vec<u8>> {
     let mut stdout = tempfile::tempfile().map_err(err)?;
     let mut stderr = tempfile::tempfile().map_err(err)?;
     let mut stdin = tempfile::tempfile().map_err(err)?;
@@ -32,12 +41,13 @@ pub fn run(dir: &Path, args: &[&str], input: Option<&[u8]>) -> Result<Vec<u8>> {
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_EDITOR", "true")
+        .envs(index.map(|path| ("GIT_INDEX_FILE", path)))
         .stdin(Stdio::from(stdin))
         .stdout(stdout.try_clone().map_err(err)?)
         .stderr(stderr.try_clone().map_err(err)?)
         .spawn()
         .map_err(err)?;
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     let status = loop {
         if let Some(status) = child.try_wait().map_err(err)? {
             break status;
@@ -45,7 +55,9 @@ pub fn run(dir: &Path, args: &[&str], input: Option<&[u8]>) -> Result<Vec<u8>> {
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            return Err("Git operation timed out after 120 seconds; refresh repository state before retrying.".into());
+            return Err(format!(
+                "Git operation timed out after {timeout_secs} seconds; refresh repository state before retrying."
+            ));
         }
         thread::sleep(Duration::from_millis(10));
     };
@@ -95,6 +107,7 @@ pub struct Snapshot {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Hunk {
+    pub old_start: usize,
     pub start: usize,
     pub end: usize,
     pub replacement: String,
@@ -103,6 +116,8 @@ pub struct Hunk {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Document {
     pub path: String,
+    pub added: bool,
+    pub images: Option<crate::preview::ImageComparison>,
     pub left: String,
     pub right: String,
     pub base: String,
@@ -114,6 +129,19 @@ pub struct Document {
     pub conflict: bool,
     pub staged: bool,
     pub hunks: Vec<Hunk>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PartialSelection {
+    pub left: String,
+    pub right: String,
+    pub indices: Vec<usize>,
+}
+struct IndexLock(PathBuf);
+impl Drop for IndexLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -193,12 +221,57 @@ impl Repository {
         self.blob(spec)
     }
     pub fn document(&self, path: &str, staged: bool) -> Result<Document> {
-        let snapshot = self.snapshot()?;
-        let entry = snapshot
-            .files
+        let entries = parse_status(&self.bytes(&[
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+        ])?)?;
+        let entry = entries
             .iter()
             .find(|f| f.path == path)
             .ok_or("File is no longer in the change list; refresh.")?;
+        self.document_for_entry(entry, staged)
+    }
+    pub fn selected_document(&self, path: &str, old_path: &str, staged: bool) -> Result<Document> {
+        self.selected_comparison(path, old_path, staged, false)
+    }
+    pub fn selected_comparison(
+        &self,
+        path: &str,
+        old_path: &str,
+        staged: bool,
+        head: bool,
+    ) -> Result<Document> {
+        let mut args = vec![
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--",
+            path,
+        ];
+        if !old_path.is_empty() {
+            args.push(old_path);
+        }
+        let entries = parse_status(&self.bytes(&args)?)?;
+        let entry = entries
+            .iter()
+            .find(|f| f.path == path)
+            .ok_or("File is no longer in the change list; refresh.")?;
+        self.comparison_for_entry(entry, staged, head)
+    }
+    pub fn document_for_entry(&self, entry: &FileEntry, staged: bool) -> Result<Document> {
+        self.comparison_for_entry(entry, staged, false)
+    }
+    pub fn comparison_for_entry(
+        &self,
+        entry: &FileEntry,
+        staged: bool,
+        head: bool,
+    ) -> Result<Document> {
+        let path = entry.path.as_str();
+        let staged = staged && !entry.conflict;
         let safe = self.safe_path(path);
         let conflict = entry.conflict;
         let old_path = if entry.old_path.is_empty() {
@@ -206,7 +279,7 @@ impl Repository {
         } else {
             &entry.old_path
         };
-        let left = if staged {
+        let left = if staged || head {
             self.optional_blob(&format!("HEAD:{old_path}"))?
         } else {
             self.optional_blob(&format!(":{path}"))?
@@ -220,17 +293,55 @@ impl Repository {
             vec![]
         } else {
             let meta = fs::metadata(&full).map_err(err)?;
-            if meta.len() > MAX_TEXT as u64 {
+            let mut prefix = [0u8; 32];
+            let count = fs::File::open(&full)
+                .map_err(err)?
+                .read(&mut prefix)
+                .map_err(err)?;
+            let is_image = crate::preview::supported_path(path)
+                || crate::preview::has_image_signature(&prefix[..count]);
+            let limit = if is_image {
+                crate::preview::MAX_IMAGE_BYTES
+            } else {
+                MAX_TEXT
+            };
+            if meta.len() > limit as u64 {
                 return Ok(uneditable(
                     path,
                     exists,
                     conflict,
                     staged,
-                    "File exceeds the 750 KB editor limit; content is not truncated. Use an external editor.",
+                    if is_image {
+                        "Image exceeds the 32 MiB preview limit."
+                    } else {
+                        "Text file exceeds the 750 KB editor limit; content is not truncated. Use an external editor."
+                    },
                 ));
             }
             fs::read(&full).map_err(err)?
         };
+        if !special
+            && !conflict
+            && (crate::preview::supported_path(path)
+                || crate::preview::has_image_signature(&left)
+                || crate::preview::has_image_signature(&right))
+        {
+            let mut document = uneditable(path, exists, false, staged, "");
+            document.added = entry.index == "?" || ((head || staged) && entry.index == "A");
+            document.images = Some(crate::preview::ImageComparison {
+                left: if left.is_empty() {
+                    None
+                } else {
+                    Some(crate::preview::prepare(&left))
+                },
+                right: if right.is_empty() && (if staged { entry.index == "D" } else { !exists }) {
+                    None
+                } else {
+                    Some(crate::preview::prepare(&right))
+                },
+            });
+            return Ok(document);
+        }
         let base = if conflict {
             self.optional_blob(&format!(":1:{path}"))?
         } else {
@@ -268,6 +379,8 @@ impl Repository {
         };
         Ok(Document {
             path: path.into(),
+            added: entry.index == "?" || ((head || staged) && entry.index == "A"),
+            images: None,
             left,
             right,
             base: text(base)?,
@@ -393,6 +506,319 @@ impl Repository {
         }
         self.cmd(&["commit", "-m", message])
     }
+    /// `git diff --cached` against HEAD, or the empty tree before the first commit.
+    fn diff_cached(&self, extra: &[&str]) -> Result<Vec<u8>> {
+        let mut args = vec!["diff", "--cached"];
+        if self.cmd(&["rev-parse", "--verify", "HEAD"]).is_err() {
+            args.push("4b825dc642cb6eb9a060e54bf8d69288fbee4904");
+        }
+        args.extend_from_slice(extra);
+        self.bytes(&args)
+    }
+    pub fn staged_names(&self) -> Result<Vec<String>> {
+        Ok(self
+            .diff_cached(&["--name-only", "-z"])?
+            .split(|b| *b == 0)
+            .filter(|s| !s.is_empty())
+            .map(|s| String::from_utf8_lossy(s).into_owned())
+            .collect())
+    }
+    pub fn stage_all(&self) -> Result<()> {
+        self.cmd(&["add", "."])?;
+        Ok(())
+    }
+    pub fn staged_numstat(&self) -> Result<String> {
+        text(self.diff_cached(&["--numstat"])?)
+    }
+    pub fn staged_diff(&self) -> Result<String> {
+        text(self.diff_cached(&[])?)
+    }
+    /// True when the working tree and index are clean, including untracked files.
+    pub fn clean(&self) -> Result<bool> {
+        Ok(self
+            .bytes(&["status", "--porcelain=v1", "-z", "--untracked-files=all"])?
+            .is_empty())
+    }
+    pub fn remotes(&self) -> Result<Vec<String>> {
+        Ok(self
+            .cmd(&["remote"])?
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_owned)
+            .collect())
+    }
+    /// The single push URL of a remote; multiple push URLs are an error.
+    pub fn push_url(&self, remote: &str) -> Result<String> {
+        let out = self.cmd(&["remote", "get-url", "--push", remote])?;
+        let mut lines = out.lines().map(str::trim).filter(|l| !l.is_empty());
+        let url = lines
+            .next()
+            .ok_or_else(|| format!("Remote {remote} has no push URL."))?;
+        if lines.next().is_some() {
+            return Err(format!("Remote {remote} has multiple push URLs."));
+        }
+        Ok(url.to_string())
+    }
+    pub fn local_tags(&self) -> Result<Vec<String>> {
+        Ok(self
+            .cmd(&["tag", "--list"])?
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_owned)
+            .collect())
+    }
+    /// Tag names advertised by a remote URL, queried with ls-remote (no fetch).
+    pub fn remote_tags(&self, url: &str) -> Result<Vec<String>> {
+        let out = text(run_index(
+            &self.root,
+            &["ls-remote", "--tags", url],
+            None,
+            None,
+            30,
+        )?)?;
+        let mut tags = std::collections::BTreeSet::new();
+        for line in out.lines() {
+            if let Some((_, reference)) = line.split_once('\t')
+                && let Some(name) = reference.strip_prefix("refs/tags/")
+            {
+                tags.insert(name.strip_suffix("^{}").unwrap_or(name).to_string());
+            }
+        }
+        Ok(tags.into_iter().collect())
+    }
+    /// Full HEAD sha and its subject line.
+    pub fn head_info(&self) -> Result<(String, String)> {
+        let out = self.cmd(&["log", "-1", "--format=%H%x00%s"])?;
+        let (sha, subject) = out
+            .trim_end()
+            .split_once('\0')
+            .ok_or("Cannot read HEAD commit.")?;
+        Ok((sha.to_string(), subject.to_string()))
+    }
+    pub fn head_sha(&self) -> Result<String> {
+        Ok(self.cmd(&["rev-parse", "HEAD"])?.trim().to_string())
+    }
+    pub fn branch(&self) -> Result<String> {
+        Ok(self
+            .cmd(&["symbolic-ref", "--short", "HEAD"])
+            .unwrap_or_else(|_| "detached".into())
+            .trim()
+            .to_string())
+    }
+    /// Annotated tag: `git tag -a <version> <commit> -m "Release <version>"`.
+    pub fn create_tag(&self, version: &str, commit: &str) -> Result<()> {
+        self.cmd(&[
+            "tag",
+            "-a",
+            version,
+            commit,
+            "-m",
+            &format!("Release {version}"),
+        ])?;
+        Ok(())
+    }
+    /// Commit a tag points at.
+    pub fn tag_commit(&self, version: &str) -> Result<String> {
+        Ok(self
+            .cmd(&["rev-parse", &format!("{version}^{{commit}}")])?
+            .trim()
+            .to_string())
+    }
+    /// `git push <remote> refs/tags/<v>:refs/tags/<v>`; never forced.
+    pub fn push_tag(&self, remote: &str, version: &str) -> Result<()> {
+        self.cmd(&[
+            "push",
+            remote,
+            &format!("refs/tags/{version}:refs/tags/{version}"),
+        ])?;
+        Ok(())
+    }
+    /// Commit checked files from the working tree, preserving unchecked index entries.
+    /// Checking a box never stages; this method runs only on explicit Commit.
+    pub fn commit_selected(&self, message: &str, paths: &[String]) -> Result<String> {
+        if message.trim().is_empty() {
+            return Err("Enter a commit message.".into());
+        }
+        if paths.is_empty() {
+            return Err("Select files to include in this commit.".into());
+        }
+        let snapshot = self.snapshot()?;
+        if snapshot.merging {
+            return Err("A merge must be committed as a whole. Use Commit merge (staged).".into());
+        }
+        if snapshot.files.iter().any(|f| f.conflict) {
+            return Err("Resolve all conflicts before committing.".into());
+        }
+        let mut selected = std::collections::BTreeSet::new();
+        let mut to_stage = std::collections::BTreeSet::new();
+        for path in paths {
+            let file = snapshot
+                .files
+                .iter()
+                .find(|f| &f.path == path)
+                .ok_or("A selected file is no longer changed; refresh before committing.")?;
+            selected.insert(file.path.as_str());
+            if file.index != "D" || fs::symlink_metadata(self.root.join(&file.path)).is_ok() {
+                to_stage.insert(file.path.as_str());
+            }
+            if !file.old_path.is_empty() {
+                selected.insert(file.old_path.as_str());
+                if self
+                    .cmd(&["ls-files", "--error-unmatch", "--", &file.old_path])
+                    .is_ok()
+                {
+                    to_stage.insert(file.old_path.as_str());
+                }
+            }
+        }
+        let mut add = vec!["add", "-A", "--"];
+        add.extend(to_stage.iter().copied());
+        if !to_stage.is_empty() {
+            self.cmd(&add)?;
+        }
+        let mut commit = vec!["commit", "--only", "-m", message, "--"];
+        commit.extend(selected.iter().copied());
+        self.cmd(&commit)
+    }
+    /// Commit a mixture of whole files and selected blocks without replacing working files.
+    /// Both indices are prepared before committing; the real index stays locked until publication.
+    pub fn commit_parts(
+        &self,
+        message: &str,
+        paths: &[String],
+        partial: &std::collections::BTreeMap<String, PartialSelection>,
+    ) -> Result<String> {
+        if partial.is_empty() {
+            return self.commit_selected(message, paths);
+        }
+        if message.trim().is_empty() {
+            return Err("Enter a commit message.".into());
+        }
+        let snapshot = self.snapshot()?;
+        if snapshot.merging || snapshot.files.iter().any(|f| f.conflict) {
+            return Err(
+                "Partial commits are unavailable during a merge or unresolved conflict.".into(),
+            );
+        }
+        let index_name = self.cmd(&["rev-parse", "--git-path", "index"])?;
+        let real_index = self.root.join(index_name.trim());
+        let mut lock_name = real_index.as_os_str().to_os_string();
+        lock_name.push(".lock");
+        let lock_path = PathBuf::from(lock_name);
+        let lock_file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)
+            .map_err(|e| format!("Cannot lock Git index: {e}"))?;
+        let _lock = IndexLock(lock_path.clone());
+        drop(lock_file);
+        let temp =
+            tempfile::tempdir_in(real_index.parent().ok_or("Index has no parent")?).map_err(err)?;
+        let commit_index = temp.path().join("commit-index");
+        let next_index = temp.path().join("next-index");
+        let cmd = |index: &Path, args: &[&str]| {
+            text(run_index(&self.root, args, None, Some(index), 120)?)
+        };
+        cmd(&commit_index, &["read-tree", "HEAD"])?;
+        if real_index.exists() {
+            fs::copy(&real_index, &next_index).map_err(err)?;
+        } else {
+            cmd(&next_index, &["read-tree", "HEAD"])?;
+        }
+        for path in paths {
+            if partial.contains_key(path) {
+                return Err("File selected both wholly and partially.".into());
+            }
+            let entry = snapshot
+                .files
+                .iter()
+                .find(|f| &f.path == path)
+                .ok_or("Selected file disappeared; refresh.")?;
+            // Starting from HEAD makes both sides of a rename valid pathspecs.
+            let mut add = vec!["add", "-A", "--", path.as_str()];
+            if !entry.old_path.is_empty() {
+                add.push(&entry.old_path);
+            }
+            cmd(&commit_index, &add)?;
+            // Reconcile using the exact selected tree entries, including staged deletions.
+            let mut reset = vec!["reset", "-q", "HEAD", "--", path.as_str()];
+            if !entry.old_path.is_empty() {
+                reset.push(&entry.old_path);
+            }
+            cmd(&next_index, &reset)?;
+            cmd(&next_index, &add)?;
+        }
+        for (path, selection) in partial {
+            let entry = snapshot
+                .files
+                .iter()
+                .find(|f| &f.path == path)
+                .ok_or("Selected file disappeared; refresh.")?;
+            let document = self.comparison_for_entry(entry, false, true)?;
+            if !document.editable
+                || !document.exists
+                || document.added
+                || !entry.old_path.is_empty()
+            {
+                return Err("Use whole-file selection for additions, deletions, renames, or non-text files.".into());
+            }
+            if selection.left != document.left || selection.right != document.right {
+                return Err(format!(
+                    "{path} changed since its blocks were selected. Review and select again."
+                ));
+            }
+            let content = selected_hunks(&selection.left, &selection.right, &selection.indices)?;
+            let staged = text(self.optional_blob(&format!(":{path}"))?)?;
+            let reconciled = if staged == selection.left {
+                content.clone()
+            } else if staged == selection.right || staged == content {
+                staged
+            } else {
+                let ours = temp.path().join("staged");
+                let base = temp.path().join("base");
+                let theirs = temp.path().join("selected");
+                fs::write(&ours, staged).map_err(err)?;
+                fs::write(&base, &selection.left).map_err(err)?;
+                fs::write(&theirs, &content).map_err(err)?;
+                self.cmd(&["merge-file", "-p", ours.to_str().ok_or("Invalid temporary path")?, base.to_str().ok_or("Invalid temporary path")?, theirs.to_str().ok_or("Invalid temporary path")?])
+                        .map_err(|_| format!("Selected blocks overlap different staged edits in {path}; unstage this file and select again. Nothing was committed."))?
+            };
+            let tree = self.cmd(&["ls-tree", "HEAD", "--", path])?;
+            let mode = tree.split_whitespace().next().ok_or("Missing HEAD mode")?;
+            if mode != "100644" && mode != "100755" {
+                return Err("Partial commits require regular text files.".into());
+            }
+            for (index, value) in [(&commit_index, content), (&next_index, reconciled)] {
+                let oid = text(run_index(
+                    &self.root,
+                    &["hash-object", "-w", "--stdin"],
+                    Some(value.as_bytes()),
+                    Some(index),
+                    120,
+                )?)?;
+                cmd(
+                    index,
+                    &[
+                        "update-index",
+                        "--add",
+                        "--cacheinfo",
+                        mode,
+                        oid.trim(),
+                        path,
+                    ],
+                )?;
+            }
+        }
+        let output = cmd(&commit_index, &["commit", "-m", message])?;
+        // No working-tree writes. Unchecked entries are copied intact from the original index.
+        fs::rename(&next_index, &lock_path)
+            .map_err(|e| format!("Commit succeeded, but preparing the index failed: {e}"))?;
+        fs::rename(&lock_path, &real_index)
+            .map_err(|e| format!("Commit succeeded, but publishing the index failed: {e}"))?;
+        Ok(output)
+    }
     pub fn network(&self, action: &str) -> Result<String> {
         match action {
             "fetch" => self.cmd(&["fetch", "--prune"]),
@@ -410,6 +836,8 @@ impl Repository {
 fn uneditable(path: &str, exists: bool, conflict: bool, staged: bool, note: &str) -> Document {
     Document {
         path: path.into(),
+        added: false,
+        images: None,
         left: String::new(),
         right: String::new(),
         base: String::new(),
@@ -455,7 +883,9 @@ pub fn parse_status(bytes: &[u8]) -> Result<Vec<FileEntry>> {
     Ok(result)
 }
 pub fn hunks(left: &str, right: &str) -> Vec<Hunk> {
-    let diff = TextDiff::from_lines(left, right);
+    let diff = TextDiff::configure()
+        .algorithm(similar::Algorithm::Patience)
+        .diff_lines(left, right);
     let mut result = vec![];
     for group in diff.grouped_ops(0) {
         let first = &group[0];
@@ -466,9 +896,10 @@ pub fn hunks(left: &str, right: &str) -> Vec<Hunk> {
             .iter()
             .flat_map(|op| diff.iter_changes(op))
             .filter(|c| c.tag() != ChangeTag::Insert)
-            .map(|c| c.to_string())
+            .map(|c| c.value().to_owned())
             .collect();
         result.push(Hunk {
+            old_start: first.old_range().start,
             start,
             end,
             replacement,
@@ -482,6 +913,23 @@ pub fn hunks(left: &str, right: &str) -> Vec<Hunk> {
         });
     }
     result
+}
+pub fn selected_hunks(left: &str, right: &str, indices: &[usize]) -> Result<String> {
+    let blocks = hunks(left, right);
+    let selected: std::collections::BTreeSet<_> = indices.iter().copied().collect();
+    if selected.is_empty() || selected.iter().any(|i| *i >= blocks.len()) {
+        return Err("Invalid or empty block selection; review again.".into());
+    }
+    let mut lines: Vec<String> = right.split_inclusive('\n').map(str::to_owned).collect();
+    for (i, hunk) in blocks.iter().enumerate().rev() {
+        if !selected.contains(&i) {
+            lines.splice(
+                hunk.start..hunk.end,
+                hunk.replacement.split_inclusive('\n').map(str::to_owned),
+            );
+        }
+    }
+    Ok(lines.concat())
 }
 pub fn restore_hunk(left: &str, right: &str, index: usize) -> Result<String> {
     let h = hunks(left, right)
