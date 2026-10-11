@@ -18,16 +18,13 @@ pub struct PreparedDiff {
     pub diff: String,
 }
 
-/// Use the index as-is when it has staged files; otherwise stage everything
-/// with `git add .`. Filenames matching the sensitive rules block the flow.
+/// Read only explicitly staged changes. Never add working-tree files implicitly.
 pub fn prepare(repo: &Repository) -> Result<PreparedDiff, String> {
-    let mut files = repo.staged_names()?;
+    let files = repo.staged_names()?;
     if files.is_empty() {
-        repo.stage_all()?;
-        files = repo.staged_names()?;
-    }
-    if files.is_empty() {
-        return Err("Nothing to commit; the working tree is clean.".into());
+        return Err(
+            "Nothing staged to commit. Check files or change blocks to stage them first.".into(),
+        );
     }
     let blocked: Vec<&str> = files
         .iter()

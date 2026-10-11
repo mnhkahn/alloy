@@ -2,6 +2,13 @@
 // key, action, Rhai handler, visible label, group
 pub const SHORTCUTS: &[(&str, &str, &str, &str, &str)] = &[
     (
+        "cmd-q",
+        "alloy.quit",
+        "closing",
+        "Quit Alloy",
+        "Application",
+    ),
+    (
         "cmd-w",
         "alloy.close_tab",
         "close_active",
@@ -62,7 +69,7 @@ pub const SHORTCUTS: &[(&str, &str, &str, &str, &str)] = &[
         "cmd-k",
         "alloy.ai_commit",
         "ai_commit",
-        "AI commit message & commit",
+        "AI message & commit staged files",
         "VCS",
     ),
     (
@@ -76,7 +83,7 @@ pub const SHORTCUTS: &[(&str, &str, &str, &str, &str)] = &[
         "cmd-enter",
         "alloy.commit",
         "commit_shortcut",
-        "Commit checked files",
+        "Commit staged files",
         "VCS",
     ),
     (
@@ -91,6 +98,14 @@ pub const SHORTCUTS: &[(&str, &str, &str, &str, &str)] = &[
         "alloy.pull_prompt",
         "pull_prompt",
         "Update project / pull…",
+        "VCS",
+    ),
+    ("cmd-alt-f", "alloy.fetch", "fetch", "Fetch remotes", "VCS"),
+    (
+        "cmd-alt-t",
+        "alloy.tag",
+        "tag_prompt",
+        "Create version tag…",
         "VCS",
     ),
     ("ctrl-v", "alloy.vcs", "vcs_actions", "VCS actions", "VCS"),
@@ -172,8 +187,24 @@ pub const SHORTCUTS: &[(&str, &str, &str, &str, &str)] = &[
         "Files",
     ),
 ];
+fn display_key(key: &str) -> String {
+    key.split('-')
+        .map(|part| match part {
+            "cmd" => "⌘".into(),
+            "alt" => "⌥".into(),
+            "shift" => "⇧".into(),
+            "ctrl" => "⌃".into(),
+            "enter" => "↵".into(),
+            "escape" => "Esc".into(),
+            "tab" => "⇥".into(),
+            "left" => "←".into(),
+            "right" => "→".into(),
+            other => other.to_uppercase(),
+        })
+        .collect()
+}
 pub fn catalog() -> serde_json::Value {
-    serde_json::Value::Array(SHORTCUTS.iter().map(|(key,action,handler,label,group)| serde_json::json!({"key":key,"action":action,"handler":handler,"label":label,"group":group})).collect())
+    serde_json::Value::Array(SHORTCUTS.iter().map(|(key,action,handler,label,group)| serde_json::json!({"key":key,"display_key":display_key(key),"action":action,"handler":handler,"label":label,"group":group})).collect())
 }
 #[cfg(test)]
 mod tests {

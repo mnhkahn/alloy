@@ -1,0 +1,127 @@
+name: Release macOS packages
+
+on:
+  push:
+    tags: ['v*', 'V*', '[0-9]*']
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing stable version tag (for example v0.2.0)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      sha: ${{ steps.version.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate tag and resolve source commit
+        id: version
+        shell: bash
+        run: |
+          version=$(python3 scripts/bundle-info.py --version "$RELEASE_TAG")
+          sha=$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: alloy
+        shell: bash
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '12.0'
+      RELEASE_VERSION: ${{ needs.version.outputs.version }}
+      RELEASE_ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+          path: alloy
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: eddix/gpui-rhai
+          ref: d87ebb9f781ecaaa53e265d39b9cacc7ded07f25
+          path: gpui-rhai
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: alloy
+          key: release-${{ matrix.arch }}
+      - name: Apply toolkit patch
+        run: sh scripts/prepare-dependency.sh
+      - name: Test
+        run: cargo test --locked
+      - name: Build release app
+        run: sh scripts/package.sh release "$RELEASE_VERSION"
+      - name: Verify and archive app
+        run: |
+          test "$(lipo -archs dist/Alloy.app/Contents/MacOS/Alloy)" = "$RELEASE_ARCH"
+          target/release/alloy --check
+          codesign --verify --deep --strict dist/Alloy.app
+          mkdir -p release-assets
+          archive="Alloy-${RELEASE_VERSION}-macOS-${RELEASE_ARCH}.zip"
+          ditto -c -k --sequesterRsrc --keepParent dist/Alloy.app "release-assets/$archive"
+          (cd release-assets && shasum -a 256 "$archive" > "$archive.sha256")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.arch }}
+          path: alloy/release-assets/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+      - name: Create release if needed and upload packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          # Both architectures must pass before any assets are published.
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --verify-tag --generate-notes --title "Alloy $RELEASE_TAG"
+          fi
+          gh release upload "$RELEASE_TAG" release-assets/* --clobber

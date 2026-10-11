@@ -187,6 +187,23 @@ fn execute(data: &Value, initial: &str) -> Result<Value, String> {
             )?;
             message = "Saved to working tree".into();
         }
+        "stage_paths" => {
+            let paths: Vec<String> =
+                serde_json::from_value(data["paths"].clone()).map_err(|e| e.to_string())?;
+            repo.stage_paths(&paths, flag(data, "checked"))?;
+            message = if flag(data, "checked") {
+                "Selected files staged"
+            } else {
+                "Selected files unstaged"
+            }
+            .into();
+        }
+        "stage_hunks" => {
+            let selection =
+                serde_json::from_value(data["selection"].clone()).map_err(|e| e.to_string())?;
+            repo.stage_hunks(path, &selection, string(data, "expected_index"))?;
+            message = "Staged blocks updated".into();
+        }
         "stage" => {
             repo.stage(path)?;
             message = "File staged".into();

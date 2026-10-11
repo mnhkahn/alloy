@@ -656,16 +656,20 @@ fn project_overview_counts_files_once_across_index_and_worktree() {
 }
 
 #[test]
-fn ai_commit_prepare_stages_everything() {
+fn ai_commit_prepare_never_stages_implicitly() {
     let (_dir, r) = fixture();
-    fs::write(r.root.join("file.txt"), "one\nchanged\nthree\n").unwrap();
-    fs::write(r.root.join("new.txt"), "fresh\n").unwrap();
-    let prepared = alloy::cmsg::prepare(&r).unwrap();
-    assert!(prepared.files.contains(&"file.txt".to_string()));
-    assert!(prepared.files.contains(&"new.txt".to_string()));
-    assert!(prepared.diff.contains("diff --git"));
-    assert!(prepared.stat.contains("file.txt"));
-    assert!(r.snapshot().unwrap().files.iter().all(|f| f.work == " "));
+    fs::write(r.root.join("file.txt"), "changed\n").unwrap();
+    fs::write(r.root.join("new.txt"), "new\n").unwrap();
+    assert!(
+        alloy::cmsg::prepare(&r)
+            .unwrap_err()
+            .contains("Nothing staged")
+    );
+    assert!(r.staged_names().unwrap().is_empty());
+    assert_eq!(
+        fs::read_to_string(r.root.join("file.txt")).unwrap(),
+        "changed\n"
+    );
 }
 #[test]
 fn ai_commit_prepare_uses_existing_index_only() {
@@ -686,6 +690,7 @@ fn ai_commit_prepare_uses_existing_index_only() {
 fn ai_commit_prepare_blocks_sensitive_files() {
     let (_dir, r) = fixture();
     fs::write(r.root.join("app.log"), "x\n").unwrap();
+    r.stage("app.log").unwrap();
     let error = alloy::cmsg::prepare(&r).unwrap_err();
     assert!(error.contains("sensitive"), "{error}");
 }
@@ -693,7 +698,7 @@ fn ai_commit_prepare_blocks_sensitive_files() {
 fn ai_commit_prepare_rejects_clean_tree() {
     let (_dir, r) = fixture();
     let error = alloy::cmsg::prepare(&r).unwrap_err();
-    assert!(error.contains("Nothing to commit"), "{error}");
+    assert!(error.contains("Nothing staged"), "{error}");
 }
 #[test]
 fn staged_diff_works_before_first_commit() {
@@ -799,4 +804,112 @@ fn tag_prefix_of_highest_version_wins() {
     let p = alloy::tag::prepare(&r).unwrap();
     assert_eq!(p.base, "V1.9.0");
     assert_eq!(p.versions["l"], "V2.0.0");
+}
+
+#[test]
+fn checkbox_staging_commits_only_staged_versions() {
+    let (_dir, r) = fixture();
+    fs::write(r.root.join("file.txt"), "staged\n").unwrap();
+    fs::write(r.root.join("other.txt"), "excluded\n").unwrap();
+    r.stage_paths(&["file.txt".into()], true).unwrap();
+    fs::write(r.root.join("file.txt"), "later unstaged\n").unwrap();
+    assert_eq!(alloy::cmsg::prepare(&r).unwrap().files, vec!["file.txt"]);
+    r.commit("test staged only").unwrap();
+    assert_eq!(
+        String::from_utf8(run(&r.root, &["show", "HEAD:file.txt"], None).unwrap()).unwrap(),
+        "staged\n"
+    );
+    assert_eq!(
+        fs::read_to_string(r.root.join("file.txt")).unwrap(),
+        "later unstaged\n"
+    );
+    assert!(run(&r.root, &["cat-file", "-e", "HEAD:other.txt"], None).is_err());
+    r.stage_paths(&["file.txt".into(), "other.txt".into()], true)
+        .unwrap();
+    r.stage_paths(&["file.txt".into(), "other.txt".into()], false)
+        .unwrap();
+    assert!(r.staged_names().unwrap().is_empty());
+    assert!(r.root.join("other.txt").exists());
+}
+#[test]
+fn block_checkboxes_write_index_preserve_other_entries_and_detect_stale_index() {
+    let (_dir, r) = fixture();
+    let changed = "ONE\ntwo\nTHREE\n";
+    fs::write(r.root.join("file.txt"), changed).unwrap();
+    fs::write(r.root.join("other.txt"), "keep staged\n").unwrap();
+    r.stage("other.txt").unwrap();
+    let d = r.selected_comparison("file.txt", "", false, true).unwrap();
+    assert_eq!(d.staged_hunks, Some(vec![]));
+    let mut selection = PartialSelection {
+        left: d.left.clone(),
+        right: d.right.clone(),
+        indices: vec![0],
+    };
+    r.stage_hunks("file.txt", &selection, d.index_source.as_ref().unwrap())
+        .unwrap();
+    let partial = r.selected_comparison("file.txt", "", false, true).unwrap();
+    assert_eq!(partial.staged_hunks, Some(vec![0]));
+    assert_eq!(partial.index_source.as_deref(), Some("ONE\ntwo\nthree\n"));
+    assert!(
+        r.stage_hunks("file.txt", &selection, d.index_source.as_ref().unwrap())
+            .is_err()
+    );
+    selection.indices = vec![0, 1];
+    r.stage_hunks(
+        "file.txt",
+        &selection,
+        partial.index_source.as_ref().unwrap(),
+    )
+    .unwrap();
+    let full = r.selected_comparison("file.txt", "", false, true).unwrap();
+    assert_eq!(full.staged_hunks, Some(vec![0, 1]));
+    selection.indices = vec![];
+    r.stage_hunks("file.txt", &selection, full.index_source.as_ref().unwrap())
+        .unwrap();
+    assert_eq!(r.staged_names().unwrap(), vec!["other.txt"]);
+    assert_eq!(
+        fs::read_to_string(r.root.join("file.txt")).unwrap(),
+        changed
+    );
+}
+#[test]
+fn batch_staging_is_atomic_and_unborn_unstage_preserves_modified_file() {
+    let (_dir, r) = fixture();
+    fs::write(r.root.join("file.txt"), "change\n").unwrap();
+    assert!(
+        r.stage_paths(&["file.txt".into(), "missing".into()], true)
+            .is_err()
+    );
+    assert!(r.staged_names().unwrap().is_empty());
+    let dir = TempDir::new().unwrap();
+    git(dir.path(), &["init", "-b", "main"]);
+    let r = Repository::open(dir.path().to_str().unwrap()).unwrap();
+    fs::write(r.root.join("new.txt"), "first\n").unwrap();
+    r.stage("new.txt").unwrap();
+    fs::write(r.root.join("new.txt"), "second\n").unwrap();
+    r.unstage("new.txt").unwrap();
+    assert!(r.staged_names().unwrap().is_empty());
+    assert_eq!(
+        fs::read_to_string(r.root.join("new.txt")).unwrap(),
+        "second\n"
+    );
+}
+#[test]
+fn staged_blocks_reject_unrepresentable_external_index() {
+    let (_dir, r) = fixture();
+    fs::write(r.root.join("file.txt"), "staged only\n").unwrap();
+    r.stage("file.txt").unwrap();
+    fs::write(r.root.join("file.txt"), "different work\n").unwrap();
+    let d = r.selected_comparison("file.txt", "", false, true).unwrap();
+    assert!(d.staged_hunks.is_none());
+    let selection = PartialSelection {
+        left: d.left,
+        right: d.right,
+        indices: vec![0],
+    };
+    assert!(
+        r.stage_hunks("file.txt", &selection, d.index_source.as_ref().unwrap())
+            .is_err()
+    );
+    assert!(r.staged_diff().unwrap().contains("+staged only"));
 }

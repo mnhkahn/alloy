@@ -129,6 +129,8 @@ pub struct Document {
     pub conflict: bool,
     pub staged: bool,
     pub hunks: Vec<Hunk>,
+    pub index_source: Option<String>,
+    pub staged_hunks: Option<Vec<usize>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -377,7 +379,19 @@ impl Repository {
         } else {
             hunks(&left, &right)
         };
+        let index_source = if head && !staged && !conflict && !entry.old_path.is_empty() {
+            None
+        } else if head && !staged && !conflict {
+            text(self.optional_blob(&format!(":{path}"))?).ok()
+        } else {
+            None
+        };
+        let staged_hunks = index_source
+            .as_ref()
+            .and_then(|index| staged_hunk_indices(&left, &right, index));
         Ok(Document {
+            index_source,
+            staged_hunks,
             path: path.into(),
             added: entry.index == "?" || ((head || staged) && entry.index == "A"),
             images: None,
@@ -422,43 +436,115 @@ impl Repository {
         temp.persist(&full).map_err(err)?;
         Ok(())
     }
-    pub fn stage(&self, path: &str) -> Result<()> {
-        let s = self.snapshot()?;
-        let entry = s
-            .files
-            .iter()
-            .find(|f| f.path == path)
-            .ok_or("File is no longer changed")?;
-        if entry.conflict {
-            return Err("Use Mark resolved after reviewing the result.".into());
-        }
-        if entry.old_path.is_empty() {
-            self.cmd(&["add", "-A", "--", path])?;
+    /// Publish an alternate index atomically while respecting Git's index lock.
+    fn edit_index(&self, edit: impl FnOnce(&Path) -> Result<()>) -> Result<()> {
+        let real = self
+            .root
+            .join(self.cmd(&["rev-parse", "--git-path", "index"])?.trim());
+        let mut name = real.as_os_str().to_os_string();
+        name.push(".lock");
+        let lock = PathBuf::from(name);
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock)
+            .map_err(|e| format!("Cannot lock Git index: {e}"))?;
+        let _guard = IndexLock(lock.clone());
+        drop(file);
+        let dir = tempfile::tempdir_in(real.parent().ok_or("Index has no parent")?).map_err(err)?;
+        let index = dir.path().join("index");
+        if real.exists() {
+            fs::copy(&real, &index).map_err(err)?;
         } else {
-            self.cmd(&["add", "-A", "--", path, &entry.old_path])?;
+            run_index(
+                &self.root,
+                &["read-tree", "--empty"],
+                None,
+                Some(&index),
+                120,
+            )?;
         }
+        edit(&index)?;
+        fs::rename(&index, &lock).map_err(err)?;
+        fs::rename(&lock, &real).map_err(err)?;
         Ok(())
     }
+    pub fn stage_paths(&self, paths: &[String], stage: bool) -> Result<()> {
+        if paths.is_empty() {
+            return Err("No files selected".into());
+        }
+        self.edit_index(|index| {
+            let snapshot = self.snapshot()?;
+            let mut names = std::collections::BTreeSet::new();
+            for path in paths {
+                let entry = snapshot
+                    .files
+                    .iter()
+                    .find(|f| &f.path == path)
+                    .ok_or("File is no longer changed; refresh.")?;
+                if entry.conflict {
+                    return Err("Use Mark resolved after reviewing the conflict.".into());
+                }
+                names.insert(path.clone());
+                if !entry.old_path.is_empty() {
+                    names.insert(entry.old_path.clone());
+                }
+            }
+            if stage {
+                let mut add = vec!["add", "-A", "--"];
+                for path in &names {
+                    if fs::symlink_metadata(self.root.join(path)).is_ok()
+                        || self
+                            .cmd(&["ls-files", "--error-unmatch", "--", path])
+                            .is_ok()
+                    {
+                        add.push(path);
+                    }
+                }
+                if add.len() > 3 {
+                    run_index(&self.root, &add, None, Some(index), 120)?;
+                }
+            } else if self.cmd(&["rev-parse", "--verify", "HEAD"]).is_ok() {
+                let mut reset = vec!["reset", "-q", "HEAD", "--"];
+                reset.extend(names.iter().map(String::as_str));
+                run_index(&self.root, &reset, None, Some(index), 120)?;
+            } else {
+                for path in &names {
+                    run_index(
+                        &self.root,
+                        &["update-index", "--force-remove", "--", path],
+                        None,
+                        Some(index),
+                        120,
+                    )?;
+                }
+            }
+            Ok(())
+        })
+    }
+    pub fn stage(&self, path: &str) -> Result<()> {
+        self.stage_paths(&[path.into()], true)
+    }
     pub fn unstage(&self, path: &str) -> Result<()> {
-        let s = self.snapshot()?;
-        let entry = s
-            .files
-            .iter()
-            .find(|f| f.path == path)
-            .ok_or("File is no longer changed")?;
-        if entry.conflict {
-            return Err("Resolve the conflict before unstaging.".into());
-        }
-        let mut args = if self.cmd(&["rev-parse", "--verify", "HEAD"]).is_ok() {
-            vec!["reset", "-q", "HEAD", "--", path]
-        } else {
-            vec!["rm", "--cached", "-r", "--", path]
-        };
-        if !entry.old_path.is_empty() {
-            args.push(&entry.old_path);
-        }
-        self.cmd(&args)?;
-        Ok(())
+        self.stage_paths(&[path.into()], false)
+    }
+    pub fn stage_hunks(
+        &self,
+        path: &str,
+        selection: &PartialSelection,
+        expected_index: &str,
+    ) -> Result<()> {
+        self.edit_index(|index| {
+            let doc = self.selected_comparison(path,"",false,true)?;
+            if !doc.editable || !doc.exists || doc.added || doc.conflict || doc.staged_hunks.is_none() {return Err("Use the file checkbox for this change; its staged content cannot be represented by these blocks.".into());}
+            if doc.left != selection.left || doc.right != selection.right || doc.index_source.as_deref() != Some(expected_index) {return Err("File or index changed; refresh before selecting blocks.".into());}
+            let content = if selection.indices.is_empty() {selection.left.clone()} else {selected_hunks(&selection.left,&selection.right,&selection.indices)?};
+            let entry = self.cmd(&["ls-files", "--stage", "--", path])?;
+            let mode = entry.split_whitespace().next().ok_or("Missing index entry")?;
+            if !["100644","100755"].contains(&mode) {return Err("Partial staging requires a regular file.".into());}
+            let oid = text(run_index(&self.root,&["hash-object","-w","--stdin"],Some(content.as_bytes()),Some(index),120)?)?;
+            run_index(&self.root,&["update-index","--cacheinfo",mode,oid.trim(),path],None,Some(index),120)?; Ok(())
+        })
     }
     pub fn resolve(&self, path: &str, expected: &str, existed: bool, content: &str) -> Result<()> {
         if !self
@@ -636,7 +722,7 @@ impl Repository {
         Ok(())
     }
     /// Commit checked files from the working tree, preserving unchecked index entries.
-    /// Checking a box never stages; this method runs only on explicit Commit.
+    /// Legacy selected-file commit API; the GUI now stages explicitly and uses `commit`.
     pub fn commit_selected(&self, message: &str, paths: &[String]) -> Result<String> {
         if message.trim().is_empty() {
             return Err("Enter a commit message.".into());
@@ -849,6 +935,8 @@ fn uneditable(path: &str, exists: bool, conflict: bool, staged: bool, note: &str
         conflict,
         staged,
         hunks: vec![],
+        index_source: None,
+        staged_hunks: None,
     }
 }
 pub fn parse_status(bytes: &[u8]) -> Result<Vec<FileEntry>> {
@@ -913,6 +1001,34 @@ pub fn hunks(left: &str, right: &str) -> Vec<Hunk> {
         });
     }
     result
+}
+/// Match index changes to the exact visible HEAD-to-working-tree blocks.
+/// Refuse ambiguous/overlapping external staging rather than dropping staged edits.
+pub fn staged_hunk_indices(left: &str, right: &str, index: &str) -> Option<Vec<usize>> {
+    let visible = hunks(left, right);
+    let staged = hunks(left, index);
+    let right_lines: Vec<_> = right.split_inclusive('\n').collect();
+    let index_lines: Vec<_> = index.split_inclusive('\n').collect();
+    let indices: Vec<_> = visible
+        .iter()
+        .enumerate()
+        .filter_map(|(i, h)| {
+            staged
+                .iter()
+                .any(|s| {
+                    s.old_start == h.old_start
+                        && s.replacement == h.replacement
+                        && index_lines[s.start..s.end] == right_lines[h.start..h.end]
+                })
+                .then_some(i)
+        })
+        .collect();
+    let reconstructed = if indices.is_empty() {
+        left.to_owned()
+    } else {
+        selected_hunks(left, right, &indices).ok()?
+    };
+    (reconstructed == index).then_some(indices)
 }
 pub fn selected_hunks(left: &str, right: &str, indices: &[usize]) -> Result<String> {
     let blocks = hunks(left, right);

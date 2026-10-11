@@ -62,14 +62,14 @@ fn loaded(ctx, result) {
             ctx.set_state("commit",saved.commit); ctx.set_state("filter",saved.filter); ctx.set_state("project_sessions",sessions);
             ctx.set_state("included",#{}); ctx.set_state("collapsed",#{}); ctx.set_state("editor",false); ctx.set_state("base_view",false);
         }
-        let previous = inclusion(ctx); let current = #{};
-        if previous_snapshot == () || previous_snapshot.root != result.snapshot.root { ctx.set_state("open_tabs", []); ctx.set_state("partial", #{}); }
-        if previous_snapshot != () && previous_snapshot.root == result.snapshot.root {
-            for file in result.snapshot.files { if file.path in previous && previous[file.path] { current[file.path] = true; } }
+        let current = #{}; let mixed = #{};
+        if switched {ctx.set_state("open_tabs",[]);}
+        for file in result.snapshot.files {
+            let staged = file.index != " " && file.index != "?" && !file.conflict;
+            current[file.path] = staged && file.work == " ";
+            if staged && file.work != " " {mixed[file.path]=true;}
         }
-        let old_partial = partials(ctx); let retained = #{};
-        for file in result.snapshot.files { if file.path in old_partial { retained[file.path] = old_partial[file.path]; } }
-        ctx.set_state("partial", retained); ctx.set_state("included", current); ctx.set_state("snapshot", result.snapshot);
+        ctx.set_state("partial",mixed); ctx.set_state("included",current); ctx.set_state("snapshot",result.snapshot);
     }
     if !result.ok {
         if !dirty(ctx) && result.document != () {
@@ -80,12 +80,6 @@ fn loaded(ctx, result) {
     }
     if "draft" in result { ctx.set_state("draft", result.draft); return; }
     let previous = ctx.get_state("doc");
-    if result.document != () {
-        let partial = partials(ctx); let path = result.document.path;
-        if path in partial && (partial[path].left != result.document.left || partial[path].right != result.document.right) {
-            partial.remove(path); ctx.set_state("partial",partial);
-        }
-    }
     ctx.set_state("doc", result.document);
     if result.document != () { let tabs = opened(ctx); if !tabs.contains(result.document.path) { tabs.push(result.document.path); ctx.set_state("open_tabs", tabs); } }
     ctx.set_state("confirm", "");
@@ -139,7 +133,7 @@ fn escape_action(ctx,payload) {ctx.set_state("palette","");ctx.set_state("confir
 fn push_prompt(ctx,payload) {if guard(ctx) && ctx.get_state("snapshot") != () {ctx.set_state("confirm","push");}}
 fn pull_prompt(ctx,payload) {if guard(ctx) && ctx.get_state("snapshot") != () {ctx.set_state("confirm","pull");}}
 fn network_confirm(ctx,payload) {let op=ctx.get_state("confirm");if op == "push" || op == "pull" {ctx.set_state("confirm","");network(ctx,op);}}
-fn commit_shortcut(ctx,payload) {if ctx.get_state("snapshot") != () && has_message(ctx) && selected_count(ctx)>0 {commit(ctx,());} else {status(ctx,"Select changes and enter a commit message first.");}}
+fn commit_shortcut(ctx,payload) {if ctx.get_state("snapshot") != () && has_message(ctx) && selected_count(ctx)>0 {commit(ctx,());} else {status(ctx,"Stage changes and enter a commit message first.");}}
 fn ai_commit(ctx,payload) {if guard(ctx) && ctx.get_state("snapshot") != () {request(ctx,"ai_commit",#{});}}
 fn palette_open(ctx,mode) {ctx.set_state("palette_query","");ctx.set_state("palette",mode);}
 fn find_action(ctx,payload) {palette_open(ctx,"actions");}
@@ -151,7 +145,7 @@ fn palette_items(ctx) {
     let result=[]; let mode=ctx.get_state("palette"); let q=ctx.get_state("palette_query").to_lower();
     if mode == "actions" || mode == "vcs" {
         let seen=[]; for item in ctx.get_state("shortcuts") {
-            if !seen.contains(item.action) && (mode != "vcs" || item.group == "VCS") && (q == "" || item.label.to_lower().contains(q) || item.key.contains(q)) { result.push(#{label:item.label,hint:item.key,value:item.action}); seen.push(item.action); }
+            if !seen.contains(item.action) && (mode != "vcs" || item.group == "VCS") && (q == "" || item.label.to_lower().contains(q) || item.key.contains(q)) { result.push(#{label:item.label,hint:item.display_key,value:item.action}); seen.push(item.action); }
         }
     } else {
         let paths=opened(ctx); let s=ctx.get_state("snapshot");
@@ -264,6 +258,8 @@ fn unstage(ctx, payload) { if guard(ctx) { request(ctx, "unstage", #{}); } }
 fn resolve(ctx, payload) { request(ctx, "resolve", save_data(ctx)); }
 fn delete_prompt(ctx, payload) { ctx.set_state("confirm", "delete"); }
 fn delete_now(ctx, payload) { request(ctx, "delete", save_data(ctx)); }
+fn fetch(ctx,payload) { if ctx.get_state("snapshot") != () {network(ctx,"fetch");} }
+fn shortcut_label(ctx,label,action) {for item in ctx.get_state("shortcuts") {if item.action == action {return `${label}  ${item.display_key}`;}} label}
 fn network(ctx, op) { if guard(ctx) { request(ctx, op, #{}); } }
 fn tag_prompt(ctx, payload) { if guard(ctx) && ctx.get_state("snapshot") != () { request(ctx,"tag_prepare",#{}); } }
 fn tag_choose(ctx, level) { let t=ctx.get_state("tag"); if t == () {return;} ctx.set_state("tag_choice",t.versions[level]); ctx.set_state("confirm","tag-go"); }
@@ -278,44 +274,37 @@ fn hunk_action(ctx, event) {
     if event.index < 0 || event.index >= d.hunks.len() { return; }
     if event.action == "restore" { restore(ctx,event.index); return; }
     if event.action != "toggle" { return; }
-    let checked = inclusion(ctx); let partial = partials(ctx); let indices = [];
-    if d.path in partial { indices = partial[d.path].indices; }
-    else if d.path in checked && checked[d.path] { for i in 0..d.hunks.len() {indices.push(i);} }
-    if indices.contains(event.index) { let next = []; for i in indices {if i != event.index {next.push(i);}} indices = next; }
-    else { indices.push(event.index); }
-    checked[d.path] = false; partial.remove(d.path);
-    if indices.len() == d.hunks.len() { checked[d.path] = true; }
-    else if indices.len() > 0 { partial[d.path] = #{left:d.left,right:d.right,indices:indices}; }
-    ctx.set_state("included",checked); ctx.set_state("partial",partial);
+    if d.staged_hunks == () || d.index_source == () {status(ctx,"Refresh or use the file checkbox for this staged change.");return;}
+    let indices = d.staged_hunks;
+    if indices.contains(event.index) {let next=[];for i in indices {if i != event.index {next.push(i);}} indices=next;}
+    else {indices.push(event.index);}
+    request(ctx,"stage_hunks",#{selection:#{left:d.left,right:d.right,indices:indices},expected_index:d.index_source});
 }
 fn hunk_controls(ctx) {
-    let d = ctx.get_state("doc"); let result = [];
-    if d == () || d.conflict || d.staged || dirty(ctx) || ctx.get_state("whitespace") != "exact" || ctx.get_state("busy") || ctx.get_state("selecting") { return result; }
-    let checked = inclusion(ctx); let partial = partials(ctx); let i = 0;
-    for h in d.hunks {
-        let enabled = (d.path in checked && checked[d.path]) || (d.path in partial && partial[d.path].indices.contains(i));
-        result.push(#{index:i,old_start:h.old_start,new_start:h.start,checked:enabled}); i += 1;
-    }
-    result
+    let d=ctx.get_state("doc");let result=[];
+    if d == () || d.conflict || d.staged || d.added || !d.exists || dirty(ctx) || d.staged_hunks == () || ctx.get_state("whitespace") != "exact" || ctx.get_state("busy") || ctx.get_state("selecting") {return result;}
+    let i=0;for h in d.hunks {result.push(#{index:i,old_start:h.old_start,new_start:h.start,checked:d.staged_hunks.contains(i)});i+=1;} result
 }
+
 fn inclusion(ctx) { let value = ctx.get_state("included"); if value == () {#{} } else {value} }
 fn checked_paths(ctx) { let result = []; let checked = inclusion(ctx); for path in checked.keys() { if checked[path] { result.push(path); } } result }
-fn toggle_include(ctx, path) {
-    if ctx.get_state("busy") { return; }
-    let checked = inclusion(ctx); let partial = partials(ctx); checked[path] = path in partial || !(path in checked && checked[path]); partial.remove(path); ctx.set_state("partial",partial); ctx.set_state("included", checked);
+fn toggle_include(ctx,path) {
+    if !guard(ctx) {return;}
+    let checked=inclusion(ctx);
+    request(ctx,"stage_paths",#{paths:[path],checked:!(path in checked && checked[path])});
 }
-fn toggle_group(ctx, paths) {
-    if ctx.get_state("busy") { return; }
-    let checked = inclusion(ctx); let all = true;
-    for path in paths { if !(path in checked && checked[path]) { all = false; } }
-    let partial = partials(ctx); for path in paths { checked[path] = !all; partial.remove(path); } ctx.set_state("partial",partial); ctx.set_state("included", checked);
+fn toggle_group(ctx,paths) {
+    if !guard(ctx) || paths.len() == 0 {return;}
+    let checked=inclusion(ctx);let all=true;
+    for path in paths {if !(path in checked && checked[path]) {all=false;}}
+    request(ctx,"stage_paths",#{paths:paths,checked:!all});
 }
 fn collapse_group(ctx, group) {
     let groups = ctx.get_state("collapsed"); if groups == () { groups = #{}; }
     groups[group] = !(group in groups && groups[group]); ctx.set_state("collapsed", groups);
 }
 fn staging_toggle(ctx, payload) { if guard(ctx) { ctx.set_state("advanced", !ctx.get_state("advanced")); if !ctx.get_state("advanced") { set_tab(ctx,"work"); } } }
-fn commit(ctx, payload) { if guard(ctx) { request(ctx, "commit_selected", #{message:ctx.get_state("commit"),paths:checked_paths(ctx),partial:partials(ctx)}); } }
+fn commit(ctx, payload) { if guard(ctx) { request(ctx, "commit", #{message:ctx.get_state("commit")}); } }
 fn commit_index(ctx, payload) { if guard(ctx) { request(ctx, "commit", #{message:ctx.get_state("commit")}); } }
 fn navigate(ctx, direction) {
     let s = ctx.get_state("snapshot"); if s == () { return; }
@@ -423,7 +412,7 @@ fn sidebar(ctx,s) {
         let folded = groups != () && group in groups && groups[group];
         let title = row([text(if folded {"›"} else {"⌄"}),text(group).with_style(style().font_weight(600)),small(`${files.len()} files`)])
             .with_style(style().flex_grow().gap(px(6)).items_center()).on_click_value(Fn("collapse_group"),group);
-        items.push(row([check_box(ctx,`Include ${group}`,count == files.len() && !mixed,mixed || (count > 0 && count < files.len()),Fn("toggle_group"),paths,group != "Merge Conflicts" && !s.merging),title])
+        items.push(row([check_box(ctx,`Stage ${group}`,count == files.len() && !mixed,mixed || (count > 0 && count < files.len()),Fn("toggle_group"),paths,group != "Merge Conflicts" && !s.merging),title])
             .with_key(`group-${group}`).with_style(style().height(px(28)).min_height(px(28)).flex_shrink(false).padding_x(px(6)).gap(px(6)).items_center()));
         if folded { continue; }
         for f in files {
@@ -440,17 +429,17 @@ fn sidebar(ctx,s) {
                 .accessibility_label(f.path).on_click_value(Fn("select"),f.path).disabled(ctx.get_state("busy"));
             let row_style = style().height(px(26)).min_height(px(26)).flex_shrink(false).padding_left(px(22)).padding_right(px(6)).gap(px(6)).items_center();
             let row_style = row_style.radius(px(3)).background(if selected {theme_color("selection")} else {theme_color("surface_raised")}).hover(style().background(theme_color("surface_hover")));
-            items.push(row([check_box(ctx,`Include ${f.path}`,f.path in checked && checked[f.path],f.path in partial,Fn("toggle_include"),f.path,!f.conflict && !s.merging),label]).with_key(`file-${f.path}`).with_style(row_style));
+            items.push(row([check_box(ctx,`Stage ${f.path}`,f.path in checked && checked[f.path],f.path in partial,Fn("toggle_include"),f.path,!f.conflict && !s.merging),label]).with_key(`file-${f.path}`).with_style(row_style));
         }
     }
     let can_commit = has_message(ctx) && selected_count(ctx) > 0;
     let footer = [textarea::Textarea(#{key:`commit-${ctx.get_state("focus_commit_id")}`,autofocus:ctx.get_state("focus_commit_id")>0,label:"Commit message",value:ctx.get_state("commit"),placeholder:"Commit message…",rows:3,on_change:Fn("commit_change")})];
     if s.merging { footer.push(button(ctx,"Commit merge (staged)",Fn("commit_index"),(),has_message(ctx))); }
-    else { footer.push(button(ctx,`Commit ${selected_count(ctx)} files`,Fn("commit"),(),can_commit)); }
+    else { footer.push(button(ctx,`Commit ${selected_count(ctx)} staged files`,Fn("commit"),(),can_commit)); }
     if ctx.get_state("advanced") && !s.merging { footer.push(button(ctx,"Commit staged index",Fn("commit_index"),(),has_message(ctx))); }
     footer.push(small("⌘S Save · ⌘W Close · ⌘⇧A Actions"));
     column([
-        row([text("Commit").with_style(style().font_size(px(14)).font_weight(600)),button(ctx,"Refresh",Fn("refresh"),(),true),button(ctx,if ctx.get_state("advanced") {"Hide staging"} else {"Staging…"},Fn("staging_toggle"),(),true)]).with_style(style().padding_x(px(6)).gap(px(6)).items_center()),
+        row([text("Commit").with_style(style().font_size(px(14)).font_weight(600)),button(ctx,shortcut_label(ctx,"Refresh","alloy.refresh"),Fn("refresh"),(),true),button(ctx,if ctx.get_state("advanced") {"Hide staging"} else {"Staging…"},Fn("staging_toggle"),(),true)]).with_style(style().padding_x(px(6)).gap(px(6)).items_center()),
         input::Input(#{key:`filter-${ctx.get_state("focus_filter_id")}`,autofocus:ctx.get_state("focus_filter_id")>0,label:"Filter changed files",value:ctx.get_state("filter"),placeholder:"Filter files…",on_change:Fn("filter_change"),part_styles:#{input:style().height(px(26)).font_size(px(12))}}),
         column(items).with_key("file-list").with_style(style().flex_grow().min_height(px(0)).overflow_y_scroll()),
         column(footer).with_style(style().border_top(px(1)).border_color(theme_color("border")).padding_top(px(6)).gap(px(5)))
@@ -459,7 +448,7 @@ fn sidebar(ctx,s) {
 fn content(ctx) {
     let d = ctx.get_state("doc");
     if d == () {
-        return column([text("Select a file to review").with_style(style().typography("display")),small("Choose a changed file on the left. Press ⌘R to refresh.")])
+        return column([text("Select a file to review").with_style(style().typography("display")),small("Choose a changed file on the left. Press ⌘⌥Y to refresh.")])
             .with_style(style().flex_grow().items_center().justify_center().gap(px(12)));
     }
     let toolbar = [
@@ -541,7 +530,7 @@ fn view(ctx) {
     let header = row([
         text("Alloy").with_style(style().font_size(px(14)).font_weight(700)),
         small(if s == () {"A home for your changes"} else {`${s.branch}  ·  ↑${s.ahead} ↓${s.behind}  ${s.upstream}`}),
-        row([button(ctx,"Refresh",Fn("refresh"),(),s != ()),button(ctx,"Fetch",Fn("network"),"fetch",s != ()),button(ctx,"Pull",Fn("network"),"pull",s != ()),button(ctx,"Push",Fn("network"),"push",s != ()),button(ctx,"Tag…",Fn("tag_prompt"),(),s != ())]).with_style(style().gap(px(8)))
+        row([button(ctx,shortcut_label(ctx,"Refresh","alloy.refresh"),Fn("refresh"),(),s != ()),button(ctx,shortcut_label(ctx,"Fetch","alloy.fetch"),Fn("fetch"),(),s != ()),button(ctx,shortcut_label(ctx,"Pull","alloy.pull_prompt"),Fn("pull_prompt"),(),s != ()),button(ctx,shortcut_label(ctx,"Push","alloy.push_prompt"),Fn("push_prompt"),(),s != ()),button(ctx,shortcut_label(ctx,"Tag…","alloy.tag"),Fn("tag_prompt"),(),s != ())]).with_style(style().gap(px(8)))
     ]).with_style(style().padding_x(px(10)).padding_y(px(4)).gap(px(16)).items_center().justify_between());
     let pathbar = row([
         overlay(text(if s == () {"Projects ▾"} else {`${file_name(s.root)}  ·  ${s.branch}  ▾`}).with_style(style().min_width(px(280)).padding_x(px(10)).padding_y(px(5)).background(theme_color("surface_raised")).hover(style().background(theme_color("surface_hover")))),project_menu(ctx),#{id:"projects-dropdown",kind:"popover",placement:"bottom",open:ctx.get_state("projects_open"),gap:4,modal:false,dismiss_on_escape:true,dismiss_on_outside:true,match_trigger_width:false,initial_focus:"first"}).on_open_change(Fn("projects_toggle")).disabled(ctx.get_state("busy")),

@@ -134,56 +134,39 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
                     .map_err(error)?;
                 Ok(())
             };
+        let before = get("included");
         call(&mut life, "toggle_include", path.clone())?;
         assert_eq!(
             get("doc"),
             UiValue::Map(doc.clone()),
-            "checkbox must not navigate"
+            "staging must not navigate"
         );
         assert_eq!(
             get("busy"),
-            UiValue::Bool(false),
-            "checkbox must not start Git work"
+            UiValue::Bool(true),
+            "checkbox must dispatch Git staging"
         );
-        if let UiValue::Map(included) = get("included") {
-            if let UiValue::String(path) = &path {
-                assert_eq!(included[path], UiValue::Bool(true));
-            }
-        } else {
-            panic!("missing inclusion state");
-        }
+        assert_eq!(
+            get("included"),
+            before,
+            "checkbox waits for actual Git status"
+        );
+        call(
+            &mut life,
+            "failed",
+            UiValue::String("simulated completion".into()),
+        )?;
         call(
             &mut life,
             "toggle_group",
             UiValue::Array(vec![path.clone()]),
         )?;
-        if let UiValue::Map(included) = get("included")
-            && let UiValue::String(path) = &path
-        {
-            assert_eq!(included[path], UiValue::Bool(false));
-        }
-        if let UiValue::Array(blocks) = &doc["hunks"]
-            && blocks.len() > 1
-            && doc["staged"] == UiValue::Bool(false)
-        {
-            let event = UiValue::Map(BTreeMap::from([
-                ("action".into(), UiValue::String("toggle".into())),
-                ("index".into(), UiValue::Integer(0)),
-                ("path".into(), path.clone()),
-                ("left".into(), doc["left"].clone()),
-                ("right".into(), doc["right"].clone()),
-            ]));
-            call(&mut life, "hunk_action", event.clone())?;
-            assert_eq!(get("busy"), UiValue::Bool(false));
-            assert_eq!(get("doc"), UiValue::Map(doc.clone()));
-            if let UiValue::Map(partial) = get("partial") {
-                assert_eq!(partial.len(), 1);
-            } else {
-                panic!("block was not selected");
-            }
-            call(&mut life, "hunk_action", event)?;
-            assert_eq!(get("partial"), UiValue::Map(BTreeMap::new()));
-        }
+        assert_eq!(get("busy"), UiValue::Bool(true));
+        call(
+            &mut life,
+            "failed",
+            UiValue::String("simulated completion".into()),
+        )?;
         call(
             &mut life,
             "collapse_group",
@@ -250,6 +233,10 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
             UiValue::Map(doc.clone()),
             "closing must preserve unsaved drafts"
         );
+        call(&mut life, "closing", UiValue::Null)?;
+        assert_eq!(get("confirm"), UiValue::String("close".into()));
+        assert_eq!(get("draft"), UiValue::String("unsaved tab draft".into()));
+        call(&mut life, "cancel", UiValue::Null)?;
         call(&mut life, "discard_now", UiValue::Null)?;
         call(&mut life, "close_tab", doc["path"].clone())?;
         assert_eq!(get("doc"), UiValue::Null);
@@ -284,7 +271,7 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
         call(&mut life, "loaded", switch_result(UiValue::Map(other)))?;
         assert_eq!(get("commit"), UiValue::String(String::new()));
         assert_eq!(get("filter"), UiValue::String(String::new()));
-        assert_eq!(get("included"), UiValue::Map(BTreeMap::new()));
+        assert!(matches!(get("included"), UiValue::Map(_)));
         call(
             &mut life,
             "commit_change",

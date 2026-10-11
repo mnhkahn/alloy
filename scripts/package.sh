@@ -3,12 +3,13 @@ set -eu
 cd "$(dirname "$0")/.."
 sh scripts/prepare-dependency.sh
 profile="${1:-release}"
+version=$(python3 scripts/bundle-info.py --version "${2:-}")
 if [ "$profile" = "release" ]; then
     cargo build --release --locked
 elif [ "$profile" = "debug" ]; then
     cargo build --locked
 else
-    echo "Usage: scripts/package.sh [release|debug]" >&2
+    echo "Usage: scripts/package.sh [release|debug] [version]" >&2
     exit 1
 fi
 bundle="dist/Alloy.app"
@@ -21,21 +22,7 @@ for spec in "16 icon_16x16" "32 icon_16x16@2x" "32 icon_32x32" "64 icon_32x32@2x
     sips -z "$1" "$1" assets/alloy-logo.png --out "$iconset/$2.png" >/dev/null
 done
 iconutil -c icns "$iconset" -o "$bundle/Contents/Resources/AppIcon.icns"
-cat > "$bundle/Contents/Info.plist" <<'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-<key>CFBundleName</key><string>Alloy</string>
-<key>CFBundleDisplayName</key><string>Alloy</string>
-<key>CFBundleIdentifier</key><string>com.mnhkahn.alloy</string>
-<key>CFBundleExecutable</key><string>Alloy</string>
-<key>CFBundleIconFile</key><string>AppIcon</string>
-<key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.1.0</string>
-<key>CFBundleVersion</key><string>1</string>
-<key>LSMinimumSystemVersion</key><string>12.0</string>
-<key>NSHighResolutionCapable</key><true/>
-</dict></plist>
-PLIST
+python3 scripts/bundle-info.py --version "$version" --output "$bundle/Contents/Info.plist"
 codesign --force --deep --sign - "$bundle"
-echo "Built $bundle"
+codesign --verify --deep --strict "$bundle"
+echo "Built $bundle ($version)"
