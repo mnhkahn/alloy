@@ -1034,3 +1034,20 @@ fn first_push_does_not_overwrite_remote_history() {
             .unwrap();
     assert_eq!(tip.trim(), original.trim());
 }
+
+#[test]
+fn status_reads_do_not_rewrite_index_stat_cache() {
+    let (_dir, r) = fixture();
+    let index_path = r.root.join(".git/index");
+    let index = fs::read(&index_path).unwrap();
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .open(r.root.join("file.txt"))
+        .unwrap();
+    file.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(2))
+        .unwrap();
+    assert!(r.snapshot().unwrap().files.is_empty());
+    assert_eq!(fs::read(&index_path).unwrap(), index);
+    assert!(r.clean().unwrap());
+    assert_eq!(fs::read(&index_path).unwrap(), index);
+}

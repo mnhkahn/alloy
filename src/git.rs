@@ -31,6 +31,11 @@ fn run_index(
     }
     stdin.rewind().map_err(err)?;
     let mut command = Command::new("git");
+    // Status is a read for Alloy. Git normally writes refreshed stat/racy-clean
+    // cache entries, which can change the real index before a commit is locked.
+    if args.first() == Some(&"status") {
+        command.env("GIT_OPTIONAL_LOCKS", "0");
+    }
     crate::git_proxy::apply(&mut command, args);
     let mut child = command
         .current_dir(dir)
