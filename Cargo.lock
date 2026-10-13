@@ -164,6 +164,7 @@ dependencies = [
  "gpui-rhai",
  "gpui-rhai-registry",
  "image",
+ "libc",
  "notify",
  "objc",
  "reqwest",
