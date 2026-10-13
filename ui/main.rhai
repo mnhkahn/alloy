@@ -19,7 +19,7 @@ fn state_schema() { #{ fields: #{
     projects_open: bool_field(false), projects_loading: bool_field(false), add_project: bool_field(false),
     acp_page_open: bool_field(false), acp_select_open: bool_field(false),
     acp_agents: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
-    selected_acp: string_field("Xiaoli"), acp_new_name: string_field(""), acp_new_command: string_field(""), acp_clear_new_fields: bool_field(false),
+    selected_acp: string_field("Xiaoli"), acp_new_name: string_field(""), acp_new_command: string_field(""), acp_clear_new_fields: bool_field(false), acp_message: string_field(""),
     projects: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
     project_sessions: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
     selecting: bool_field(false), pending_path: string_field(""),
@@ -212,7 +212,7 @@ fn projects_loaded(ctx, result) {
     ctx.set_state("projects_loading",false); ctx.set_state("projects",result.projects);
     if "acp_agents" in result {ctx.set_state("acp_agents",result.acp_agents);ctx.set_state("selected_acp",result.selected_acp);}
 }
-fn projects_failed(ctx, error) { ctx.set_state("projects_loading",false); status(ctx,`Cannot refresh projects: ${error}`); }
+fn projects_failed(ctx, error) { ctx.set_state("projects_loading",false); if ctx.get_state("acp_page_open") {acp_status(ctx,`无法加载 ACP 配置：${error}`);} else {status(ctx,`Cannot refresh projects: ${error}`);} }
 fn projects_toggle(ctx, value) {
     ctx.set_state("projects_open",value);
     if ctx.get_state("projects_open") && !ctx.get_state("projects_loading") {
@@ -221,6 +221,7 @@ fn projects_toggle(ctx, value) {
 }
 fn acp_page_open(ctx, payload) {
     ctx.set_state("acp_page_open",true);
+    ctx.set_state("acp_message","");
     ctx.set_state("projects_open",false);
     if !ctx.get_state("projects_loading") {
         ctx.set_state("projects_loading",true); ctx.start_task("alloy.git","execute",#{op:"projects"},Fn("projects_loaded"),Fn("projects_failed"));
@@ -241,30 +242,32 @@ fn acp_dropdown_change(ctx,value) {
     acp_select_change(ctx,value.sub_string(6));
 }
 fn acp_select_open_changed(ctx,value) {ctx.set_state("acp_select_open",value);}
+fn acp_status(ctx,message) {ctx.set_state("acp_message",message);status(ctx,message);}
 fn acp_settings_saved(ctx,result) {
     if !result.ok {acp_settings_failed(ctx,result.message);return;}
-    ctx.set_state("busy",false);ctx.set_state("acp_agents",result.acp_agents);ctx.set_state("selected_acp",result.selected_acp);status(ctx,result.message);
+    ctx.set_state("busy",false);ctx.set_state("acp_agents",result.acp_agents);ctx.set_state("selected_acp",result.selected_acp);acp_status(ctx,if ctx.get_state("acp_clear_new_fields") {`已注册 ${result.selected_acp}，并设为当前代理。`} else {"ACP 配置已保存。"});
     if ctx.get_state("acp_clear_new_fields") {ctx.set_state("acp_new_name","");ctx.set_state("acp_new_command","");ctx.set_state("acp_clear_new_fields",false);}
 }
-fn acp_settings_failed(ctx,error) {ctx.set_state("busy",false);ctx.set_state("acp_clear_new_fields",false);status(ctx,`${error}`);}
+fn acp_settings_failed(ctx,error) {ctx.set_state("busy",false);ctx.set_state("acp_clear_new_fields",false);acp_status(ctx,`保存失败：${error}`);}
 fn save_acp_settings(ctx,agents,selected) {
     if ctx.get_state("busy") {return;}
-    ctx.set_state("busy",true);status(ctx,"Saving ACP settings…");
+    ctx.set_state("busy",true);acp_status(ctx,"正在保存 ACP 配置…");
     ctx.start_task("alloy.git","execute",#{op:"save_acp_settings",acp_agents:agents,selected_acp:selected},Fn("acp_settings_saved"),Fn("acp_settings_failed"));
 }
 fn acp_select_change(ctx,value) {save_acp_settings(ctx,acp_agent_list(ctx),value);}
 fn acp_new_name_change(ctx,value) {ctx.set_state("acp_new_name",value);}
 fn acp_new_command_change(ctx,value) {ctx.set_state("acp_new_command",value);}
 fn acp_add_agent(ctx,payload) {
+    if ctx.get_state("busy") || ctx.get_state("projects_loading") {return;}
     let name=ctx.get_state("acp_new_name").trim();let command=ctx.get_state("acp_new_command").trim();
-    if name=="" || command=="" {status(ctx,"请填写名称和命令字符串。");return;}
+    if name=="" || command=="" {acp_status(ctx,"请填写名称和命令字符串。");return;}
     let agents=acp_agent_list(ctx);
-    for agent in agents {if agent.name==name {status(ctx,`An ACP agent named ${name} already exists.`);return;}}
-    agents.push(#{name:name,command:command});ctx.set_state("acp_clear_new_fields",true);
+    for agent in agents {if agent.name==name {acp_status(ctx,`名称 ${name} 已存在，请使用其他名称。`);return;}}
+    agents.push(#{name:name,path:"",command:command});ctx.set_state("acp_clear_new_fields",true);
     save_acp_settings(ctx,agents,name);
 }
 fn acp_remove_agent(ctx,name) {
-    let agents=acp_agent_list(ctx);if agents.len()<2 {status(ctx,"Keep at least one ACP agent configured.");return;}
+    let agents=acp_agent_list(ctx);if agents.len()<2 {acp_status(ctx,"至少保留一个 ACP 代理。");return;}
     let remaining=[];for agent in agents {if agent.name!=name {remaining.push(agent);}}
     let selected=ctx.get_state("selected_acp");if selected==name {selected=remaining[0].name;}
     save_acp_settings(ctx,remaining,selected);
@@ -636,10 +639,11 @@ fn acp_config_page(ctx) {
         column(rows).with_style(style().gap(px(4))),
         small("手动注册"),
         input::Input(#{key:"acp-agent-name",label:"名称",value:ctx.get_state("acp_new_name"),placeholder:"e.g. Xiaoli work",on_change:Fn("acp_new_name_change"),disabled:ctx.get_state("busy")}),
-        input::Input(#{key:"acp-agent-command",label:"命令字符串",value:ctx.get_state("acp_new_command"),placeholder:"opencode acp",on_change:Fn("acp_new_command_change"),disabled:ctx.get_state("busy")}),
-        row([button(ctx,"注册",Fn("acp_add_agent"),(),!ctx.get_state("busy") && !ctx.get_state("projects_loading"))]).with_style(style().gap(px(8))),
+        input::Input(#{key:"acp-agent-command",label:"命令字符串",value:ctx.get_state("acp_new_command"),placeholder:"opencode acp",on_change:Fn("acp_new_command_change"),on_submit:Fn("acp_add_agent"),disabled:ctx.get_state("busy")}),
+        row([button(ctx,if ctx.get_state("busy") {"保存中…"} else {"注册"},Fn("acp_add_agent"),(),!ctx.get_state("busy") && !ctx.get_state("projects_loading"))]).with_style(style().gap(px(8))),
+        text(ctx.get_state("acp_message")).with_key("acp-settings-status").with_style(style().font_size(px(13))),
         small("命令支持参数及引号，例如 opencode acp 或 \"/path with spaces/agent\" acp。配置自动保存。")
-    ]).with_style(style().flex_grow().padding(px(28)).gap(px(12)).background(theme_color("surface")))
+    ]).with_style(style().flex_grow().overflow_y_scroll().padding(px(28)).gap(px(12)).background(theme_color("surface")))
 }
 fn view(ctx) {
     if ctx.get_state("acp_page_open") {return acp_config_page(ctx);}

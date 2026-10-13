@@ -28,10 +28,18 @@ pub struct Projects {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AcpAgent {
     pub name: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "null_string",
+        skip_serializing_if = "String::is_empty"
+    )]
     pub path: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_string")]
     pub command: String,
+}
+// UI arrays can represent absent optional map fields as explicit nulls.
+fn null_string<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
 }
 impl Default for Projects {
     fn default() -> Self {
