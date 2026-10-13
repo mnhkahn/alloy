@@ -78,6 +78,10 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
         ("mode_open", UiValue::Bool(false)),
         ("whitespace_open", UiValue::Bool(true)),
         ("whitespace_change", UiValue::String("ignore_all".into())),
+        ("acp_select_open_changed", UiValue::Bool(true)),
+        ("acp_select_open_changed", UiValue::Bool(false)),
+        ("acp_dropdown_change", UiValue::String("register".into())),
+        ("acp_page_close", UiValue::Null),
     ] {
         let callback = engine.callback(&compiled, name).map_err(error)?;
         let _ = life

@@ -27,7 +27,10 @@ pub struct Projects {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AcpAgent {
     pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub path: String,
+    #[serde(default)]
+    pub command: String,
 }
 impl Default for Projects {
     fn default() -> Self {
@@ -37,6 +40,7 @@ impl Default for Projects {
             acp_agents: vec![AcpAgent {
                 name: "Xiaoli".into(),
                 path: default_xiaoli_path(),
+                command: String::new(),
             }],
             selected_acp: "Xiaoli".into(),
         }
@@ -113,6 +117,7 @@ impl Projects {
             settings.acp_agents.push(AcpAgent {
                 name: "Xiaoli".into(),
                 path: settings.xiaoli_path.clone(),
+                command: String::new(),
             });
         }
         if !settings
@@ -127,6 +132,7 @@ impl Projects {
             .iter()
             .find(|agent| agent.name == settings.selected_acp)
             .map(|agent| agent.path.clone())
+            .filter(|path| !path.is_empty())
             .unwrap_or_else(default_xiaoli_path);
         Ok(settings)
     }

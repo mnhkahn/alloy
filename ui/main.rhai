@@ -19,7 +19,7 @@ fn state_schema() { #{ fields: #{
     projects_open: bool_field(false), projects_loading: bool_field(false), add_project: bool_field(false),
     acp_page_open: bool_field(false), acp_select_open: bool_field(false),
     acp_agents: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
-    selected_acp: string_field("Xiaoli"), acp_new_name: string_field(""), acp_new_path: string_field(""), acp_clear_new_fields: bool_field(false),
+    selected_acp: string_field("Xiaoli"), acp_new_name: string_field(""), acp_new_command: string_field(""), acp_clear_new_fields: bool_field(false),
     projects: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
     project_sessions: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
     selecting: bool_field(false), pending_path: string_field(""),
@@ -181,7 +181,7 @@ fn palette_items(ctx) {
     let result=[]; let mode=ctx.get_state("palette"); let q=ctx.get_state("palette_query").to_lower();
     if mode == "actions" || mode == "vcs" {
         let seen=[]; for item in ctx.get_state("shortcuts") {
-            if !seen.contains(item.action) && (mode != "vcs" || item.group == "VCS") && (q == "" || item.label.to_lower().contains(q) || item.key.contains(q)) { result.push(#{label:item.label,hint:item.display_key,value:item.action}); seen.push(item.action); }
+            if !seen.contains(item.action) && (mode != "vcs" || item.group == "VCS") && (q == "" || item.label.to_lower().contains(q) || item.key.contains(q)) { result.push(#{label:item.label,hint:"",value:item.action}); seen.push(item.action); }
         }
     } else {
         let paths=opened(ctx); let s=ctx.get_state("snapshot");
@@ -197,7 +197,7 @@ fn palette_choose(ctx,value) {
 fn palette_submit(ctx,payload) {let items=palette_items(ctx);if items.len()>0 {palette_choose(ctx,items[0].value);}}
 fn palette_view(ctx) {
     let mode=ctx.get_state("palette");if mode == "" {return row([]);}
-    let nodes=[row([text(if mode == "recent" {"Recent / open files"} else if mode == "files" {"Go to changed file"} else {"Find action"}),button(ctx,"Close · Esc",Fn("escape_action"),(),true)]).with_style(style().justify_between()),input::Input(#{key:`palette-${mode}`,label:"Search",value:ctx.get_state("palette_query"),placeholder:"Type to filter; Enter opens the first result",autofocus:true,on_change:Fn("palette_query"),on_submit:Fn("palette_submit")})];
+    let nodes=[row([text(if mode == "recent" {"Recent / open files"} else if mode == "files" {"Go to changed file"} else {"Find action"}),button(ctx,"Close",Fn("escape_action"),(),true)]).with_style(style().justify_between()),input::Input(#{key:`palette-${mode}`,label:"Search",value:ctx.get_state("palette_query"),placeholder:"Type to filter",autofocus:true,on_change:Fn("palette_query"),on_submit:Fn("palette_submit")})];
     for item in palette_items(ctx) {nodes.push(row([text(item.label),small(item.hint)]).with_key(item.value).with_style(style().padding(px(5)).justify_between().hover(style().background(theme_color("selection")))).tab_index(0).on_key_value("enter",Fn("palette_choose"),item.value).on_click_value(Fn("palette_choose"),item.value));}
     column(nodes).with_key("action-palette").with_style(style().padding(px(10)).gap(px(4)).max_height(px(300)).overflow_y_scroll().flex_shrink(false).background(theme_color("surface_raised")))
 }
@@ -228,31 +228,37 @@ fn acp_page_open(ctx, payload) {
 }
 fn acp_page_close(ctx, payload) {ctx.set_state("acp_page_open",false);}
 fn acp_agent_list(ctx) {let agents=ctx.get_state("acp_agents");if agents==() {[]} else {agents}}
-fn acp_options(ctx) {let options=[];for agent in acp_agent_list(ctx) {options.push(#{value:agent.name,label:agent.name});}options}
+fn acp_agent_command(agent) {if "command" in agent && agent.command!="" {agent.command} else {`${agent.path} acp`}}
+fn acp_options(ctx) {let options=[];for agent in acp_agent_list(ctx) {options.push(#{value:`agent:${agent.name}`,label:agent.name});}options.push(#{value:"register",label:"手动注册"});options}
 fn acp_agent_selector(ctx) {
     if acp_agent_list(ctx).len()==0 {return small("Loading ACP…");}
-    select::Select(#{key:"acp-agent-selector",label:"ACP agent",options:acp_options(ctx),value:ctx.get_state("selected_acp"),open:ctx.get_state("acp_select_open"),query:"",empty_text:"No ACP agents",size:"xs",width:px(176),on_change:Fn("acp_select_change"),on_open_change:Fn("acp_select_open_changed")})
+    select::Select(#{key:"acp-agent-selector",label:"ACP agent",placement:"top",disabled:ctx.get_state("busy"),options:acp_options(ctx),value:`agent:${ctx.get_state("selected_acp")}`,open:ctx.get_state("acp_select_open"),query:"",empty_text:"No ACP agents",size:"xs",width:px(176),on_change:Fn("acp_dropdown_change"),on_open_change:Fn("acp_select_open_changed")})
+}
+fn acp_dropdown_change(ctx,value) {
+    ctx.set_state("acp_select_open",false);
+    if value=="register" {acp_page_open(ctx,());return;}
+    acp_select_change(ctx,value.sub_string(6));
 }
 fn acp_select_open_changed(ctx,value) {ctx.set_state("acp_select_open",value);}
 fn acp_settings_saved(ctx,result) {
     ctx.set_state("busy",false);ctx.set_state("acp_agents",result.acp_agents);ctx.set_state("selected_acp",result.selected_acp);status(ctx,result.message);
-    if ctx.get_state("acp_clear_new_fields") {ctx.set_state("acp_new_name","");ctx.set_state("acp_new_path","");ctx.set_state("acp_clear_new_fields",false);}
+    if ctx.get_state("acp_clear_new_fields") {ctx.set_state("acp_new_name","");ctx.set_state("acp_new_command","");ctx.set_state("acp_clear_new_fields",false);}
 }
-fn acp_settings_failed(ctx,error) {ctx.set_state("busy",false);status(ctx,`${error}`);}
+fn acp_settings_failed(ctx,error) {ctx.set_state("busy",false);ctx.set_state("acp_clear_new_fields",false);status(ctx,`${error}`);}
 fn save_acp_settings(ctx,agents,selected) {
     if ctx.get_state("busy") {return;}
     ctx.set_state("busy",true);status(ctx,"Saving ACP settings…");
     ctx.start_task("alloy.git","execute",#{op:"save_acp_settings",acp_agents:agents,selected_acp:selected},Fn("acp_settings_saved"),Fn("acp_settings_failed"));
 }
-fn acp_select_change(ctx,value) {ctx.set_state("selected_acp",value);save_acp_settings(ctx,acp_agent_list(ctx),value);}
+fn acp_select_change(ctx,value) {save_acp_settings(ctx,acp_agent_list(ctx),value);}
 fn acp_new_name_change(ctx,value) {ctx.set_state("acp_new_name",value);}
-fn acp_new_path_change(ctx,value) {ctx.set_state("acp_new_path",value);}
+fn acp_new_command_change(ctx,value) {ctx.set_state("acp_new_command",value);}
 fn acp_add_agent(ctx,payload) {
-    let name=ctx.get_state("acp_new_name").trim();let path=ctx.get_state("acp_new_path").trim();
-    if name=="" || path=="" {status(ctx,"Enter a name and executable path for the ACP agent.");return;}
+    let name=ctx.get_state("acp_new_name").trim();let command=ctx.get_state("acp_new_command").trim();
+    if name=="" || command=="" {status(ctx,"请填写名称和命令字符串。");return;}
     let agents=acp_agent_list(ctx);
     for agent in agents {if agent.name==name {status(ctx,`An ACP agent named ${name} already exists.`);return;}}
-    agents.push(#{name:name,path:path});ctx.set_state("acp_clear_new_fields",true);
+    agents.push(#{name:name,command:command});ctx.set_state("acp_clear_new_fields",true);
     save_acp_settings(ctx,agents,name);
 }
 fn acp_remove_agent(ctx,name) {
@@ -342,8 +348,8 @@ fn unstage(ctx, payload) { if guard(ctx) { request(ctx, "unstage", #{}); } }
 fn resolve(ctx, payload) { request(ctx, "resolve", save_data(ctx)); }
 fn delete_prompt(ctx, payload) { ctx.set_state("confirm", "delete"); }
 fn delete_now(ctx, payload) { request(ctx, "delete", save_data(ctx)); }
+fn shortcut_label(ctx,label,action) {for item in ctx.get_state("shortcuts") {if item.action==action {return `${label}  ${item.display_key}`;}} label}
 fn fetch(ctx,payload) { if ctx.get_state("snapshot") != () {network(ctx,"fetch");} }
-fn shortcut_label(ctx,label,action) {for item in ctx.get_state("shortcuts") {if item.action == action {return `${label}  ${item.display_key}`;}} label}
 fn network(ctx, op) { if guard(ctx) { request(ctx, op, #{}); } }
 fn tag_prompt(ctx, payload) { if guard(ctx) && ctx.get_state("snapshot") != () { request(ctx,"tag_prepare",#{}); } }
 fn tag_choose(ctx, level) { let t=ctx.get_state("tag"); if t == () {return;} ctx.set_state("tag_choice",t.versions[level]); ctx.set_state("confirm","tag-go"); }
@@ -523,7 +529,7 @@ fn sidebar(ctx,s) {
     if s.merging { footer.push(button(ctx,"Commit merge (staged)",Fn("commit_index"),(),has_message(ctx))); }
     else { footer.push(button(ctx,`Commit ${selected_count(ctx)} staged files`,Fn("commit"),(),can_commit)); }
     if ctx.get_state("advanced") && !s.merging { footer.push(button(ctx,"Commit staged index",Fn("commit_index"),(),has_message(ctx))); }
-    footer.push(small("⌘S Save · ⌘W Close · ⌘⇧A Actions"));
+    footer.push(row([button(ctx,shortcut_label(ctx,"Commit","alloy.ai_commit"),Fn("ai_commit"),(),true),acp_agent_selector(ctx)]).with_style(style().gap(px(8)).items_center()));
     column([
         row([text("Commit").with_style(style().font_size(px(14)).font_weight(600)),button(ctx,shortcut_label(ctx,"Refresh","alloy.refresh"),Fn("refresh"),(),true),button(ctx,if ctx.get_state("advanced") {"Hide staging"} else {"Staging…"},Fn("staging_toggle"),(),true)]).with_style(style().padding_x(px(6)).gap(px(6)).items_center()),
         input::Input(#{key:`filter-${ctx.get_state("focus_filter_id")}`,autofocus:ctx.get_state("focus_filter_id")>0,label:"Filter changed files",value:ctx.get_state("filter"),placeholder:"Filter files…",on_change:Fn("filter_change"),part_styles:#{input:style().height(px(26)).font_size(px(12))}}),
@@ -545,7 +551,7 @@ fn content(ctx) {
     ];
     toolbar.push(button(ctx,if ctx.get_state("hide_unchanged") {"Show all lines"} else {"Hide unchanged"},Fn("toggle_unchanged"),(),true));
     if d.images != () { toolbar = [button(ctx,"←",Fn("previous_file"),(),true),button(ctx,"→",Fn("next_file"),(),true),small("Image preview"),button(ctx,if ctx.get_state("image_actual") {"Reduced size"} else {"Actual size (100%)"},Fn("image_zoom"),(),true)]; }
-    if dirty(ctx) { toolbar.push(button(ctx,"Save ⌘S",Fn("save"),(),d.editable)); toolbar.push(button(ctx,"Discard",Fn("discard"),(),true)); }
+    if dirty(ctx) { toolbar.push(button(ctx,"Save",Fn("save"),(),d.editable)); toolbar.push(button(ctx,"Discard",Fn("discard"),(),true)); }
     if ctx.get_state("advanced") {
         toolbar.push(tab(ctx,"Local","work")); toolbar.push(tab(ctx,"Staged","staged"));
         toolbar.push(button(ctx,"Stage",Fn("stage"),(),!d.conflict)); toolbar.push(button(ctx,"Unstage",Fn("unstage"),(),!d.conflict));
@@ -616,21 +622,21 @@ fn acp_config_page(ctx) {
     let agents=acp_agent_list(ctx);let rows=[];
     for agent in agents {
         rows.push(row([
-            column([text(agent.name).with_style(style().font_weight(600)),small(agent.path)]).with_style(style().flex_grow().gap(px(2))),
+            column([text(agent.name).with_style(style().font_weight(600)),small(acp_agent_command(agent))]).with_style(style().flex_grow().gap(px(2))),
             button(ctx,if ctx.get_state("selected_acp")==agent.name {"Selected"} else {"Select"},Fn("acp_select_change"),agent.name,ctx.get_state("selected_acp")!=agent.name && !ctx.get_state("busy")),
             button(ctx,"Remove",Fn("acp_remove_agent"),agent.name,agents.len()>1 && !ctx.get_state("busy"))
         ]).with_key(`acp-agent-${agent.name}`).with_style(style().padding(px(8)).gap(px(8)).items_center().background(theme_color("surface_raised"))));
     }
     column([
         row([button(ctx,"← Back",Fn("acp_page_close"),(),true),text("ACP configuration").with_style(style().font_size(px(18)).font_weight(700))]).with_style(style().gap(px(12)).items_center()),
-        small("Choose the ACP agent used by ⌘K. Each agent uses its own executable and Xiaoli model settings."),
+        small("配置用于生成提交信息的 ACP 代理。"),
         if agents.len()==0 && ctx.get_state("projects_loading") {small("Loading saved ACP agents…")} else {small("Configured agents")},
         column(rows).with_style(style().gap(px(4))),
-        small("Add an ACP agent"),
-        input::Input(#{key:"acp-agent-name",label:"Name",value:ctx.get_state("acp_new_name"),placeholder:"e.g. Xiaoli work",on_change:Fn("acp_new_name_change"),disabled:ctx.get_state("busy")}),
-        input::Input(#{key:"acp-agent-path",label:"Executable path",value:ctx.get_state("acp_new_path"),placeholder:"/absolute/path/to/agent",on_change:Fn("acp_new_path_change"),disabled:ctx.get_state("busy")}),
-        row([button(ctx,"Add agent",Fn("acp_add_agent"),(),!ctx.get_state("busy") && !ctx.get_state("projects_loading"))]).with_style(style().gap(px(8))),
-        small("The agent list and current selection are saved in Alloy settings; model credentials remain managed by Xiaoli.")
+        small("手动注册"),
+        input::Input(#{key:"acp-agent-name",label:"名称",value:ctx.get_state("acp_new_name"),placeholder:"e.g. Xiaoli work",on_change:Fn("acp_new_name_change"),disabled:ctx.get_state("busy")}),
+        input::Input(#{key:"acp-agent-command",label:"命令字符串",value:ctx.get_state("acp_new_command"),placeholder:"opencode acp",on_change:Fn("acp_new_command_change"),disabled:ctx.get_state("busy")}),
+        row([button(ctx,"注册",Fn("acp_add_agent"),(),!ctx.get_state("busy") && !ctx.get_state("projects_loading"))]).with_style(style().gap(px(8))),
+        small("命令支持参数及引号，例如 opencode acp 或 \"/path with spaces/agent\" acp。配置自动保存。")
     ]).with_style(style().flex_grow().padding(px(28)).gap(px(12)).background(theme_color("surface")))
 }
 fn view(ctx) {
@@ -640,8 +646,6 @@ fn view(ctx) {
         text("Alloy").with_style(style().font_size(px(14)).font_weight(700)),
         small(if s == () {"A home for your changes"} else {`${s.branch}  ·  ↑${s.ahead} ↓${s.behind}  ${s.upstream}`}),
         row([
-            button(ctx,"ACP",Fn("acp_page_open"),(),true),
-            acp_agent_selector(ctx),
             button(ctx,shortcut_label(ctx,"Refresh","alloy.refresh"),Fn("refresh"),(),s != ()),button(ctx,shortcut_label(ctx,"Fetch","alloy.fetch"),Fn("fetch"),(),s != ()),button(ctx,shortcut_label(ctx,"Pull","alloy.pull_prompt"),Fn("pull_prompt"),(),s != ()),button(ctx,shortcut_label(ctx,"Push","alloy.push_prompt"),Fn("push_prompt"),(),s != ()),button(ctx,shortcut_label(ctx,"Tag…","alloy.tag"),Fn("tag_prompt"),(),s != ())
         ]).with_style(style().gap(px(8)))
     ]).with_style(style().padding_x(px(10)).padding_y(px(4)).gap(px(16)).items_center().justify_between());
