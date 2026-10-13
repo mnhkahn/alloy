@@ -125,8 +125,15 @@ pub fn sanitize(text: &str) -> Result<String, String> {
     Ok(message)
 }
 
+/// Generated text is retained independently of the subsequent Git result.
+#[derive(Debug)]
+pub struct GeneratedCommit {
+    pub message: String,
+    pub commit_result: Result<String, String>,
+}
+
 /// Full Cmd+K flow: staged diff → compact → model → sanitize → commit. No push.
-pub fn generate_and_commit(repo: &Repository) -> Result<String, String> {
+pub fn generate_and_commit(repo: &Repository) -> Result<GeneratedCommit, String> {
     let prepared = prepare(repo)?;
     let diff = compact(&prepared.diff);
     let user = format!(
@@ -137,12 +144,12 @@ pub fn generate_and_commit(repo: &Repository) -> Result<String, String> {
     );
     let raw = acp::generate(&repo.root, SYSTEM_PROMPT, &user)?;
     let message = sanitize(&raw)?;
-    let output = repo.commit(&message)?;
-    Ok(format!(
-        "{}\n{}",
-        message.lines().next().unwrap_or_default(),
-        output.trim()
-    ))
+    // Keep the generated text available to the UI even when Git rejects the commit.
+    let commit_result = repo.commit(&message);
+    Ok(GeneratedCommit {
+        message,
+        commit_result,
+    })
 }
 
 #[cfg(test)]

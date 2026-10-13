@@ -57,7 +57,6 @@ fn loaded(ctx, result) {
     if "document" in result { result.document = prepare_images(ctx, result.document); }
     ctx.set_state("busy", false);
     status(ctx, result.message);
-    if "committed" in result && result.committed { ctx.set_state("commit",""); }
     if "tag_retry" in result { ctx.set_state("tag",result.tag_retry); ctx.set_state("confirm","tag-retry"); }
     if "overview" in result { let projects = project_list(ctx); let found = false; for i in 0..projects.len() { if projects[i].root == result.overview.root { projects[i] = result.overview; found = true; } } if !found { projects.push(result.overview); } ctx.set_state("projects",projects); }
     if result.snapshot != () {
@@ -79,6 +78,7 @@ fn loaded(ctx, result) {
         }
         ctx.set_state("partial",mixed); ctx.set_state("included",current); ctx.set_state("snapshot",result.snapshot);
     }
+    if "commit_message" in result && result.commit_message != () {ctx.set_state("commit",result.commit_message);}
     if !result.ok {
         if !dirty(ctx) && result.document != () {
             ctx.set_state("doc", result.document); ctx.set_state("draft", result.document.right);
@@ -235,12 +235,14 @@ fn acp_agent_selector(ctx) {
     select::Select(#{key:"acp-agent-selector",label:"ACP agent",placement:"top",disabled:ctx.get_state("busy"),options:acp_options(ctx),value:`agent:${ctx.get_state("selected_acp")}`,open:ctx.get_state("acp_select_open"),query:"",empty_text:"No ACP agents",size:"xs",width:px(176),on_change:Fn("acp_dropdown_change"),on_open_change:Fn("acp_select_open_changed")})
 }
 fn acp_dropdown_change(ctx,value) {
-    ctx.set_state("acp_select_open",false);
-    if value=="register" {acp_page_open(ctx,());return;}
+    if value==() {return;}
+    if value=="register" {ctx.set_state("acp_select_open",false);acp_page_open(ctx,());return;}
+    if !value.starts_with("agent:") {return;}
     acp_select_change(ctx,value.sub_string(6));
 }
 fn acp_select_open_changed(ctx,value) {ctx.set_state("acp_select_open",value);}
 fn acp_settings_saved(ctx,result) {
+    if !result.ok {acp_settings_failed(ctx,result.message);return;}
     ctx.set_state("busy",false);ctx.set_state("acp_agents",result.acp_agents);ctx.set_state("selected_acp",result.selected_acp);status(ctx,result.message);
     if ctx.get_state("acp_clear_new_fields") {ctx.set_state("acp_new_name","");ctx.set_state("acp_new_command","");ctx.set_state("acp_clear_new_fields",false);}
 }
@@ -525,7 +527,7 @@ fn sidebar(ctx,s) {
         }
     }
     let can_commit = has_message(ctx) && selected_count(ctx) > 0;
-    let footer = [textarea::Textarea(#{key:`commit-${ctx.get_state("focus_commit_id")}`,autofocus:ctx.get_state("focus_commit_id")>0,label:"Commit message",value:ctx.get_state("commit"),placeholder:"Commit message…",rows:3,on_change:Fn("commit_change")})];
+    let footer = [textarea::Textarea(#{key:`commit-${ctx.get_state("focus_commit_id")}`,autofocus:ctx.get_state("focus_commit_id")>0,label:"Commit message",value:ctx.get_state("commit"),placeholder:"生成的提交信息会显示在这里",read_only:true,min_rows:4,max_rows:10})];
     if s.merging { footer.push(button(ctx,"Commit merge (staged)",Fn("commit_index"),(),has_message(ctx))); }
     else { footer.push(button(ctx,`Commit ${selected_count(ctx)} staged files`,Fn("commit"),(),can_commit)); }
     if ctx.get_state("advanced") && !s.merging { footer.push(button(ctx,"Commit staged index",Fn("commit_index"),(),has_message(ctx))); }

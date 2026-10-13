@@ -80,6 +80,11 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
         ("whitespace_change", UiValue::String("ignore_all".into())),
         ("acp_select_open_changed", UiValue::Bool(true)),
         ("acp_select_open_changed", UiValue::Bool(false)),
+        ("acp_dropdown_change", UiValue::Null),
+        (
+            "acp_dropdown_change",
+            UiValue::String("agent:Xiaoli".into()),
+        ),
         ("acp_dropdown_change", UiValue::String("register".into())),
         ("acp_page_close", UiValue::Null),
     ] {
@@ -325,6 +330,39 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
         );
         assert_eq!(get("filter"), UiValue::String("first filter".into()));
 
+        life.render(&mut engine).map_err(error)?;
+    }
+    // Completion must retain the full generated message in the read-only box,
+    // including when the subsequent Git commit fails.
+    for (ok, status_text, generated) in [
+        (
+            true,
+            "Committed staged changes.",
+            "fix(acp): 修复进程回收\n\n1. 避免生成结果丢失\n2. 保留完整正文",
+        ),
+        (
+            false,
+            "Commit failed.",
+            "fix(acp): 保留失败时生成的信息\n\n1. 支持查看生成结果",
+        ),
+    ] {
+        let callback = engine.callback(&compiled, "loaded").map_err(error)?;
+        let _ = life
+            .invoke_callback_transactional(
+                &engine,
+                &callback,
+                UiValue::Map(BTreeMap::from([
+                    ("ok".into(), UiValue::Bool(ok)),
+                    ("message".into(), UiValue::String(status_text.into())),
+                    ("snapshot".into(), UiValue::Null),
+                    ("document".into(), UiValue::Null),
+                    ("committed".into(), UiValue::Bool(ok)),
+                    ("commit_message".into(), UiValue::String(generated.into())),
+                ])),
+            )
+            .map_err(error)?;
+        assert_eq!(get("commit"), UiValue::String(generated.into()));
+        assert_eq!(get("message"), UiValue::String(status_text.into()));
         life.render(&mut engine).map_err(error)?;
     }
     Ok(())

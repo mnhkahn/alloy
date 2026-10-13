@@ -2,9 +2,13 @@
 use serde_json::{Value, json};
 use std::{
     io::{BufRead, BufReader, Read, Write},
+    os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::mpsc::{self, Receiver, RecvTimeoutError},
+    sync::{
+        Arc, Mutex,
+        mpsc::{self, Receiver, RecvTimeoutError},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -15,6 +19,40 @@ const TIMEOUT: Duration = Duration::from_secs(180);
 mod tests {
     use super::*;
     use crate::projects::AcpAgent;
+
+    #[test]
+    fn cleanup_closes_pipes_kept_open_by_a_launchers_child() {
+        for explicit_stop in [true, false] {
+            let mut process = ChildGuard(
+                Command::new("/bin/sh")
+                    .args(["-c", "sleep 30 & printf ready"])
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .process_group(0)
+                    .spawn()
+                    .unwrap(),
+                false,
+            );
+            let mut stdout = process.0.stdout.take().unwrap();
+            let mut ready = [0_u8; 5];
+            stdout.read_exact(&mut ready).unwrap();
+            assert_eq!(&ready, b"ready");
+            assert!(process.0.wait().unwrap().success());
+            let mut stderr = process.0.stderr.take().unwrap();
+            let (tx, rx) = mpsc::channel();
+            thread::spawn(move || {
+                let mut bytes = Vec::new();
+                stderr.read_to_end(&mut bytes).unwrap();
+                let _ = tx.send(());
+            });
+            if explicit_stop {
+                process.stop();
+            }
+            drop(process);
+            rx.recv_timeout(Duration::from_secs(2))
+                .expect("the exited launcher's child must not keep stderr open");
+        }
+    }
 
     #[test]
     fn manual_command_preserves_quoted_arguments_and_literal_text() {
@@ -59,12 +97,27 @@ mod tests {
     }
 }
 
-struct ChildGuard(Child);
+struct ChildGuard(Child, bool);
+
+impl ChildGuard {
+    fn stop(&mut self) {
+        if self.1 {
+            return;
+        }
+        self.1 = true;
+        // The child starts in its own process group. Negative pid targets that
+        // group, including launchers' children that still own the stdio pipes.
+        unsafe {
+            libc::kill(-(self.0.id() as libc::pid_t), libc::SIGKILL);
+        }
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        self.stop();
     }
 }
 
@@ -187,8 +240,10 @@ pub fn generate(cwd: &Path, system: &str, prompt: &str) -> Result<String, String
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .process_group(0)
             .spawn()
             .map_err(|e| format!("Could not start {} ACP: {e}", binary.display()))?,
+        false,
     );
     let mut input = child
         .0
@@ -205,11 +260,21 @@ pub fn generate(cwd: &Path, system: &str, prompt: &str) -> Result<String, String
         .stderr
         .take()
         .ok_or("Could not open ACP agent diagnostics.")?;
-    let stderr_reader = thread::spawn(move || {
+    let diagnostics = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let diagnostic_writer = diagnostics.clone();
+    thread::spawn(move || {
         let mut stderr = stderr;
-        let mut bytes = Vec::new();
-        let _ = stderr.read_to_end(&mut bytes);
-        String::from_utf8_lossy(&bytes).trim().to_owned()
+        let mut buffer = [0_u8; 4096];
+        while let Ok(count) = stderr.read(&mut buffer) {
+            if count == 0 {
+                break;
+            }
+            if let Ok(mut bytes) = diagnostic_writer.lock() {
+                bytes.extend_from_slice(&buffer[..count]);
+                let excess = bytes.len().saturating_sub(16 * 1024);
+                bytes.drain(..excess);
+            }
+        }
     });
     let (line_tx, line_rx) = mpsc::channel();
     thread::spawn(move || {
@@ -232,7 +297,7 @@ pub fn generate(cwd: &Path, system: &str, prompt: &str) -> Result<String, String
     });
     let mut request_id = 0_u64;
     let read_response = |child: &mut Child,
-                         stderr_reader: &mut Option<thread::JoinHandle<String>>,
+                         diagnostics: &Arc<Mutex<Vec<u8>>>,
                          input: &mut std::process::ChildStdin,
                          reader: &Receiver<Result<String, String>>,
                          id: u64,
@@ -267,13 +332,10 @@ pub fn generate(cwd: &Path, system: &str, prompt: &str) -> Result<String, String
                 Err(RecvTimeoutError::Timeout) => return Err("ACP agent timed out.".into()),
                 Err(RecvTimeoutError::Disconnected) => {
                     let status = child.try_wait().ok().flatten();
-                    if status.is_none() {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                    }
-                    let stderr = stderr_reader
-                        .take()
-                        .and_then(|reader| reader.join().ok())
+                    let stderr = diagnostics
+                        .lock()
+                        .ok()
+                        .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_owned())
                         .filter(|text| !text.is_empty());
                     return Err(match (status, stderr) {
                         (Some(status), Some(stderr)) => format!(
@@ -361,10 +423,9 @@ pub fn generate(cwd: &Path, system: &str, prompt: &str) -> Result<String, String
         "initialize",
         json!({"protocolVersion":1,"clientInfo":{"name":"Alloy","version":env!("CARGO_PKG_VERSION")},"clientCapabilities":{}}),
     )?;
-    let mut stderr_reader = Some(stderr_reader);
     read_response(
         &mut child.0,
-        &mut stderr_reader,
+        &diagnostics,
         &mut input,
         &line_rx,
         init,
@@ -381,7 +442,7 @@ pub fn generate(cwd: &Path, system: &str, prompt: &str) -> Result<String, String
     )?;
     let session_result = read_response(
         &mut child.0,
-        &mut stderr_reader,
+        &diagnostics,
         &mut input,
         &line_rx,
         session,
@@ -423,7 +484,7 @@ pub fn generate(cwd: &Path, system: &str, prompt: &str) -> Result<String, String
         )?;
         read_response(
             &mut child.0,
-            &mut stderr_reader,
+            &diagnostics,
             &mut input,
             &line_rx,
             model_selection,
@@ -442,7 +503,7 @@ pub fn generate(cwd: &Path, system: &str, prompt: &str) -> Result<String, String
     let mut answer = String::new();
     read_response(
         &mut child.0,
-        &mut stderr_reader,
+        &diagnostics,
         &mut input,
         &line_rx,
         prompt_id,
@@ -451,11 +512,7 @@ pub fn generate(cwd: &Path, system: &str, prompt: &str) -> Result<String, String
         &mut answer,
         start,
     )?;
-    let _ = child.0.kill();
-    let _ = child.0.wait();
-    if let Some(stderr_reader) = stderr_reader {
-        let _ = stderr_reader.join();
-    }
+    child.stop();
     if answer.trim().is_empty() {
         Err("ACP agent returned no commit message.".into())
     } else {

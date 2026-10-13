@@ -245,6 +245,9 @@ fn execute(data: &Value, initial: &str) -> Result<Value, String> {
         );
     }
     let mut message = "Repository refreshed".to_string();
+    let mut commit_message = None;
+    let mut committed = false;
+    let mut operation_ok = true;
     match op {
         "bootstrap" | "open" | "clone" | "browse" | "refresh" => (),
         "save" => {
@@ -302,13 +305,26 @@ fn execute(data: &Value, initial: &str) -> Result<Value, String> {
             } else {
                 BTreeMap::new()
             };
-            message = repo.commit_parts(string(data, "message"), &paths, &partial)?;
+            repo.commit_parts(string(data, "message"), &paths, &partial)?;
+            message = "Committed staged changes.".into();
         }
         "commit" => {
-            message = repo.commit(string(data, "message"))?;
+            repo.commit(string(data, "message"))?;
+            message = "Committed staged changes.".into();
         }
         "ai_commit" => {
-            message = alloy::cmsg::generate_and_commit(&repo)?;
+            let generated = alloy::cmsg::generate_and_commit(&repo)?;
+            commit_message = Some(generated.message);
+            match generated.commit_result {
+                Ok(_) => {
+                    committed = true;
+                    message = "Committed staged changes.".into();
+                }
+                Err(error) => {
+                    operation_ok = false;
+                    message = error;
+                }
+            }
         }
         "tag_prepare" => {
             let preview = alloy::tag::prepare(&repo)?;
@@ -369,9 +385,10 @@ fn execute(data: &Value, initial: &str) -> Result<Value, String> {
         Some(file) => Some(repo.comparison_for_entry(file, flag(data, "staged"), true)?),
         None => None,
     };
-    let mut result = json!({"ok":true,"message":message,"snapshot":snapshot,"document":document,"overview":alloy::projects::Overview::from_snapshot(&snapshot)});
+    let mut result = json!({"ok":operation_ok,"message":message,"snapshot":snapshot,"document":document,"overview":alloy::projects::Overview::from_snapshot(&snapshot)});
     if op == "ai_commit" {
-        result["committed"] = json!(true);
+        result["committed"] = json!(committed);
+        result["commit_message"] = json!(commit_message);
     }
     if matches!(op, "tag_create" | "tag_push") {
         result["tagged"] = json!(true);

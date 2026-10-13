@@ -3,6 +3,7 @@ use crate::git::{Repository, Snapshot};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -102,9 +103,34 @@ impl Overview {
     }
 }
 pub fn store_path() -> Result<PathBuf, String> {
-    std::env::var_os("HOME")
-        .map(|p| PathBuf::from(p).join("Library/Application Support/Alloy/projects.json"))
-        .ok_or("Home directory unavailable".into())
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or("Home directory unavailable")?;
+    let path = home.join(".alloy/projects.json");
+    match fs::metadata(&path) {
+        Ok(_) => return Ok(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.to_string()),
+    }
+    let legacy = home.join("Library/Application Support/Alloy/projects.json");
+    let bytes = match fs::read(&legacy) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(path),
+        Err(error) => return Err(format!("Could not read previous Alloy settings: {error}")),
+    };
+    // Keep all fields during migration and retain the original as a backup.
+    serde_json::from_slice::<Projects>(&bytes)
+        .map_err(|error| format!("Could not migrate previous Alloy settings: {error}"))?;
+    let parent = path.parent().ok_or("Missing settings directory")?;
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let mut file = tempfile::NamedTempFile::new_in(parent).map_err(|error| error.to_string())?;
+    file.write_all(&bytes).map_err(|error| error.to_string())?;
+    match file.persist_noclobber(&path) {
+        Ok(_) => {}
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(format!("Could not migrate Alloy settings: {error}")),
+    }
+    Ok(path)
 }
 impl Projects {
     pub fn read(path: &Path) -> Result<Self, String> {
