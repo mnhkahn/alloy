@@ -1,0 +1,77 @@
+diff --git a/crates/gpui-rhai/src/renderer.rs b/crates/gpui-rhai/src/renderer.rs
+index b5b7f2d..a5610f4 100644
+--- a/crates/gpui-rhai/src/renderer.rs
++++ b/crates/gpui-rhai/src/renderer.rs
+@@ -3627,6 +3627,16 @@ fn native_virtual_collection_element<C: ColorResolver>(
+     VirtualListEntityElement::new_collection(path, spec.clone(), runtime, retained_id)
+ }
+ 
++fn slot_inherits_primary_focus(
++    tree: &RetainedUiTree,
++    node: NodeId,
++    primitives: &PrimitiveRegistry,
++) -> bool {
++    tree.node(node)
++        .and_then(crate::RetainedNode::primitive)
++        .is_some_and(|primitive| primitives.uses_primary_focus(primitive))
++}
++
+ fn owned_slot_runtime<C: ColorResolver>(
+     environment: &RenderEnvironment<'_, C>,
+     path: &str,
+@@ -3646,6 +3656,12 @@ fn owned_slot_runtime<C: ColorResolver>(
+             })
+             .collect::<BTreeSet<_>>();
+         for node in nodes {
++            // Only native controls need an inherited focus owner in an owned
++            // slot. Assigning the panel's handle to ordinary menu labels makes
++            // multiple accessibility nodes claim focus in the same frame.
++            if !slot_inherits_primary_focus(tree, node, environment.primitives) {
++                continue;
++            }
+             if let Some(focus) =
+                 primitive_focus_owner(Some(tree), Some(node), environment.focus_handles)
+             {
+@@ -5472,6 +5488,42 @@ mod tests {
+     use super::*;
+     use crate::{ColorValue, Length, Rgba8, Style};
+ 
++    #[test]
++    fn virtual_menu_text_does_not_inherit_parent_focus_handle() {
++        let primitives = crate::RuntimeEngine::new().primitive_registry();
++        let native_input = UiNode::custom(crate::PrimitiveNode {
++            primitive: crate::text_input_primitive_descriptor().id,
++            key: Some("input".into()),
++            props: crate::PrimitiveProps::new(),
++        });
++        let label = UiNode::row(vec![UiNode::text("Xiaoli"), UiNode::text("Selected")]);
++        let panel = UiNode::column(vec![label, native_input])
++            .with_style(&Style::new().focus(&Style::new()));
++        let mut tree = RetainedUiTree::new();
++        tree.reconcile(panel).unwrap();
++        let root = tree.root_id().unwrap();
++        let children: Vec<_> = tree
++            .node(root)
++            .unwrap()
++            .children()
++            .map(|child| child.node())
++            .collect();
++        assert!(!slot_inherits_primary_focus(&tree, root, &primitives));
++        assert!(!slot_inherits_primary_focus(
++            &tree,
++            children[0],
++            &primitives
++        ));
++        for child in tree.node(children[0]).unwrap().children() {
++            assert!(!slot_inherits_primary_focus(
++                &tree,
++                child.node(),
++                &primitives
++            ));
++        }
++        assert!(slot_inherits_primary_focus(&tree, children[1], &primitives));
++    }
++
+     struct TypographyResolver;
+ 
+     impl ColorResolver for TypographyResolver {
