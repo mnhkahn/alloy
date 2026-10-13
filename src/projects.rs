@@ -6,9 +6,41 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[derive(Default, Serialize, Deserialize)]
+pub const DEFAULT_XIAOLI_PATH: &str = "/Users/mnhkahn/go/bin/xiaoli";
+
+fn default_xiaoli_path() -> String {
+    DEFAULT_XIAOLI_PATH.to_owned()
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct Projects {
+    #[serde(default)]
     pub roots: Vec<String>,
+    /// Kept for migration from early ACP builds that stored one path only.
+    #[serde(default = "default_xiaoli_path")]
+    pub xiaoli_path: String,
+    #[serde(default)]
+    pub acp_agents: Vec<AcpAgent>,
+    #[serde(default)]
+    pub selected_acp: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AcpAgent {
+    pub name: String,
+    pub path: String,
+}
+impl Default for Projects {
+    fn default() -> Self {
+        Self {
+            roots: Vec::new(),
+            xiaoli_path: default_xiaoli_path(),
+            acp_agents: vec![AcpAgent {
+                name: "Xiaoli".into(),
+                path: default_xiaoli_path(),
+            }],
+            selected_acp: "Xiaoli".into(),
+        }
+    }
 }
 #[derive(Serialize)]
 pub struct Overview {
@@ -72,11 +104,31 @@ pub fn store_path() -> Result<PathBuf, String> {
 }
 impl Projects {
     pub fn read(path: &Path) -> Result<Self, String> {
-        match fs::read(path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(e.to_string()),
+        let mut settings = match fs::read(path) {
+            Ok(bytes) => serde_json::from_slice::<Self>(&bytes).map_err(|e| e.to_string())?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(e) => return Err(e.to_string()),
+        };
+        if settings.acp_agents.is_empty() {
+            settings.acp_agents.push(AcpAgent {
+                name: "Xiaoli".into(),
+                path: settings.xiaoli_path.clone(),
+            });
         }
+        if !settings
+            .acp_agents
+            .iter()
+            .any(|agent| agent.name == settings.selected_acp)
+        {
+            settings.selected_acp = settings.acp_agents[0].name.clone();
+        }
+        settings.xiaoli_path = settings
+            .acp_agents
+            .iter()
+            .find(|agent| agent.name == settings.selected_acp)
+            .map(|agent| agent.path.clone())
+            .unwrap_or_else(default_xiaoli_path);
+        Ok(settings)
     }
     pub fn remember(&mut self, root: &str) {
         self.roots.retain(|r| r != root);

@@ -138,7 +138,58 @@ fn execute(data: &Value, initial: &str) -> Result<Value, String> {
     let path = string(data, "path");
     if op == "projects" {
         let projects = alloy::projects::Projects::read(&alloy::projects::store_path()?)?;
-        return Ok(json!({"projects":projects.overview()}));
+        return Ok(
+            json!({"projects":projects.overview(),"acp_agents":projects.acp_agents,"selected_acp":projects.selected_acp}),
+        );
+    }
+    if op == "save_acp_settings" {
+        let agents: Vec<alloy::projects::AcpAgent> =
+            serde_json::from_value(data["acp_agents"].clone()).map_err(|e| e.to_string())?;
+        let selected = string(data, "selected_acp").trim();
+        let mut agents = agents;
+        if agents.is_empty() {
+            return Err("Configure at least one ACP agent.".into());
+        }
+        for agent in &mut agents {
+            agent.name = agent.name.trim().to_owned();
+            agent.path = agent.path.trim().to_owned();
+        }
+        for (index, agent) in agents.iter().enumerate() {
+            let path = std::path::Path::new(agent.path.trim());
+            if agent.name.is_empty() {
+                return Err("ACP agent names cannot be empty.".into());
+            }
+            if agents[..index].iter().any(|other| other.name == agent.name) {
+                return Err(format!("ACP agent name '{}' is already used.", agent.name));
+            }
+            if !path.is_absolute() {
+                return Err(format!(
+                    "Executable path for '{}' must be absolute.",
+                    agent.name
+                ));
+            }
+        }
+        let selected_agent = agents
+            .iter()
+            .find(|agent| agent.name == selected)
+            .ok_or("Select a configured ACP agent.")?;
+        if !std::path::Path::new(&selected_agent.path).is_file() {
+            return Err(format!(
+                "Executable path for '{}' does not exist: {}",
+                selected_agent.name, selected_agent.path
+            ));
+        }
+        let selected_name = selected_agent.name.clone();
+        let selected_path = selected_agent.path.clone();
+        let settings_path = alloy::projects::store_path()?;
+        let mut settings = alloy::projects::Projects::read(&settings_path)?;
+        settings.acp_agents = agents;
+        settings.selected_acp = selected_name;
+        settings.xiaoli_path = selected_path;
+        settings.save(&settings_path)?;
+        return Ok(
+            json!({"ok":true,"message":"ACP settings saved.","acp_agents":settings.acp_agents,"selected_acp":settings.selected_acp,"snapshot":null,"document":null}),
+        );
     }
     let remembered = if op == "bootstrap" && initial.is_empty() {
         alloy::projects::Projects::read(&alloy::projects::store_path()?)?

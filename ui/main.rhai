@@ -17,6 +17,9 @@ fn state_schema() { #{ fields: #{
     hide_unchanged: bool_field(true), mode_open: bool_field(false), whitespace_open: bool_field(false), whitespace: string_field("exact"),
     open_tabs: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
     projects_open: bool_field(false), projects_loading: bool_field(false), add_project: bool_field(false),
+    acp_page_open: bool_field(false), acp_select_open: bool_field(false),
+    acp_agents: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
+    selected_acp: string_field("Xiaoli"), acp_new_name: string_field(""), acp_new_path: string_field(""), acp_clear_new_fields: bool_field(false),
     projects: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
     project_sessions: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
     selecting: bool_field(false), pending_path: string_field(""),
@@ -143,6 +146,7 @@ fn init(ctx) {
     let shortcuts = ctx.call_capability("alloy.boot","shortcuts",()); ctx.set_state("shortcuts",shortcuts);
     let registered = []; for shortcut in shortcuts { if !registered.contains(shortcut.action) {ctx.register_action(shortcut.action,Fn(shortcut.handler)); registered.push(shortcut.action);} }
     ctx.set_close_handler(Fn("closing"));
+    ctx.set_state("projects_loading",true);ctx.start_task("alloy.git","execute",#{op:"projects"},Fn("projects_loaded"),Fn("projects_failed"));
     let fixture = ctx.call_capability("alloy.boot", "state", ());
     if fixture == () { request(ctx, "bootstrap", #{}); } else { loaded(ctx, fixture); }
 }
@@ -204,13 +208,58 @@ fn closing(ctx, payload) {
 fn close_now(ctx, payload) { ctx.close_window(ctx.window_id()); }
 fn cancel(ctx, payload) { ctx.set_state("confirm", ""); ctx.set_state("tag", ()); ctx.set_state("tag_choice", ""); }
 fn project_list(ctx) { let value = ctx.get_state("projects"); if value == () {[]} else {value} }
-fn projects_loaded(ctx, result) { ctx.set_state("projects_loading",false); ctx.set_state("projects",result.projects); }
+fn projects_loaded(ctx, result) {
+    ctx.set_state("projects_loading",false); ctx.set_state("projects",result.projects);
+    if "acp_agents" in result {ctx.set_state("acp_agents",result.acp_agents);ctx.set_state("selected_acp",result.selected_acp);}
+}
 fn projects_failed(ctx, error) { ctx.set_state("projects_loading",false); status(ctx,`Cannot refresh projects: ${error}`); }
 fn projects_toggle(ctx, value) {
     ctx.set_state("projects_open",value);
     if ctx.get_state("projects_open") && !ctx.get_state("projects_loading") {
         ctx.set_state("projects_loading",true); ctx.start_task("alloy.git","execute",#{op:"projects"},Fn("projects_loaded"),Fn("projects_failed"));
     }
+}
+fn acp_page_open(ctx, payload) {
+    ctx.set_state("acp_page_open",true);
+    ctx.set_state("projects_open",false);
+    if !ctx.get_state("projects_loading") {
+        ctx.set_state("projects_loading",true); ctx.start_task("alloy.git","execute",#{op:"projects"},Fn("projects_loaded"),Fn("projects_failed"));
+    }
+}
+fn acp_page_close(ctx, payload) {ctx.set_state("acp_page_open",false);}
+fn acp_agent_list(ctx) {let agents=ctx.get_state("acp_agents");if agents==() {[]} else {agents}}
+fn acp_options(ctx) {let options=[];for agent in acp_agent_list(ctx) {options.push(#{value:agent.name,label:agent.name});}options}
+fn acp_agent_selector(ctx) {
+    if acp_agent_list(ctx).len()==0 {return small("Loading ACP…");}
+    select::Select(#{key:"acp-agent-selector",label:"ACP agent",options:acp_options(ctx),value:ctx.get_state("selected_acp"),open:ctx.get_state("acp_select_open"),query:"",empty_text:"No ACP agents",size:"xs",width:px(176),on_change:Fn("acp_select_change"),on_open_change:Fn("acp_select_open_changed")})
+}
+fn acp_select_open_changed(ctx,value) {ctx.set_state("acp_select_open",value);}
+fn acp_settings_saved(ctx,result) {
+    ctx.set_state("busy",false);ctx.set_state("acp_agents",result.acp_agents);ctx.set_state("selected_acp",result.selected_acp);status(ctx,result.message);
+    if ctx.get_state("acp_clear_new_fields") {ctx.set_state("acp_new_name","");ctx.set_state("acp_new_path","");ctx.set_state("acp_clear_new_fields",false);}
+}
+fn acp_settings_failed(ctx,error) {ctx.set_state("busy",false);status(ctx,`${error}`);}
+fn save_acp_settings(ctx,agents,selected) {
+    if ctx.get_state("busy") {return;}
+    ctx.set_state("busy",true);status(ctx,"Saving ACP settings…");
+    ctx.start_task("alloy.git","execute",#{op:"save_acp_settings",acp_agents:agents,selected_acp:selected},Fn("acp_settings_saved"),Fn("acp_settings_failed"));
+}
+fn acp_select_change(ctx,value) {ctx.set_state("selected_acp",value);save_acp_settings(ctx,acp_agent_list(ctx),value);}
+fn acp_new_name_change(ctx,value) {ctx.set_state("acp_new_name",value);}
+fn acp_new_path_change(ctx,value) {ctx.set_state("acp_new_path",value);}
+fn acp_add_agent(ctx,payload) {
+    let name=ctx.get_state("acp_new_name").trim();let path=ctx.get_state("acp_new_path").trim();
+    if name=="" || path=="" {status(ctx,"Enter a name and executable path for the ACP agent.");return;}
+    let agents=acp_agent_list(ctx);
+    for agent in agents {if agent.name==name {status(ctx,`An ACP agent named ${name} already exists.`);return;}}
+    agents.push(#{name:name,path:path});ctx.set_state("acp_clear_new_fields",true);
+    save_acp_settings(ctx,agents,name);
+}
+fn acp_remove_agent(ctx,name) {
+    let agents=acp_agent_list(ctx);if agents.len()<2 {status(ctx,"Keep at least one ACP agent configured.");return;}
+    let remaining=[];for agent in agents {if agent.name!=name {remaining.push(agent);}}
+    let selected=ctx.get_state("selected_acp");if selected==name {selected=remaining[0].name;}
+    save_acp_settings(ctx,remaining,selected);
 }
 fn project_choose(ctx, root) {
     if !guard(ctx) { return; }
@@ -563,12 +612,38 @@ fn project_menu(ctx) {
     if project_list(ctx).len() == 0 && !ctx.get_state("projects_loading") { nodes.push(small("No recent projects. Add a repository to begin.")); }
     column(nodes).with_key("project-menu").with_style(style().width(px(960)).max_height(px(360)).overflow_y_scroll().flex_shrink(false).padding(px(6)).gap(px(3)).background(theme_color("surface_raised")))
 }
+fn acp_config_page(ctx) {
+    let agents=acp_agent_list(ctx);let rows=[];
+    for agent in agents {
+        rows.push(row([
+            column([text(agent.name).with_style(style().font_weight(600)),small(agent.path)]).with_style(style().flex_grow().gap(px(2))),
+            button(ctx,if ctx.get_state("selected_acp")==agent.name {"Selected"} else {"Select"},Fn("acp_select_change"),agent.name,ctx.get_state("selected_acp")!=agent.name && !ctx.get_state("busy")),
+            button(ctx,"Remove",Fn("acp_remove_agent"),agent.name,agents.len()>1 && !ctx.get_state("busy"))
+        ]).with_key(`acp-agent-${agent.name}`).with_style(style().padding(px(8)).gap(px(8)).items_center().background(theme_color("surface_raised"))));
+    }
+    column([
+        row([button(ctx,"← Back",Fn("acp_page_close"),(),true),text("ACP configuration").with_style(style().font_size(px(18)).font_weight(700))]).with_style(style().gap(px(12)).items_center()),
+        small("Choose the ACP agent used by ⌘K. Each agent uses its own executable and Xiaoli model settings."),
+        if agents.len()==0 && ctx.get_state("projects_loading") {small("Loading saved ACP agents…")} else {small("Configured agents")},
+        column(rows).with_style(style().gap(px(4))),
+        small("Add an ACP agent"),
+        input::Input(#{key:"acp-agent-name",label:"Name",value:ctx.get_state("acp_new_name"),placeholder:"e.g. Xiaoli work",on_change:Fn("acp_new_name_change"),disabled:ctx.get_state("busy")}),
+        input::Input(#{key:"acp-agent-path",label:"Executable path",value:ctx.get_state("acp_new_path"),placeholder:"/absolute/path/to/agent",on_change:Fn("acp_new_path_change"),disabled:ctx.get_state("busy")}),
+        row([button(ctx,"Add agent",Fn("acp_add_agent"),(),!ctx.get_state("busy") && !ctx.get_state("projects_loading"))]).with_style(style().gap(px(8))),
+        small("The agent list and current selection are saved in Alloy settings; model credentials remain managed by Xiaoli.")
+    ]).with_style(style().flex_grow().padding(px(28)).gap(px(12)).background(theme_color("surface")))
+}
 fn view(ctx) {
+    if ctx.get_state("acp_page_open") {return acp_config_page(ctx);}
     let s = ctx.get_state("snapshot");
     let header = row([
         text("Alloy").with_style(style().font_size(px(14)).font_weight(700)),
         small(if s == () {"A home for your changes"} else {`${s.branch}  ·  ↑${s.ahead} ↓${s.behind}  ${s.upstream}`}),
-        row([button(ctx,shortcut_label(ctx,"Refresh","alloy.refresh"),Fn("refresh"),(),s != ()),button(ctx,shortcut_label(ctx,"Fetch","alloy.fetch"),Fn("fetch"),(),s != ()),button(ctx,shortcut_label(ctx,"Pull","alloy.pull_prompt"),Fn("pull_prompt"),(),s != ()),button(ctx,shortcut_label(ctx,"Push","alloy.push_prompt"),Fn("push_prompt"),(),s != ()),button(ctx,shortcut_label(ctx,"Tag…","alloy.tag"),Fn("tag_prompt"),(),s != ())]).with_style(style().gap(px(8)))
+        row([
+            button(ctx,"ACP",Fn("acp_page_open"),(),true),
+            acp_agent_selector(ctx),
+            button(ctx,shortcut_label(ctx,"Refresh","alloy.refresh"),Fn("refresh"),(),s != ()),button(ctx,shortcut_label(ctx,"Fetch","alloy.fetch"),Fn("fetch"),(),s != ()),button(ctx,shortcut_label(ctx,"Pull","alloy.pull_prompt"),Fn("pull_prompt"),(),s != ()),button(ctx,shortcut_label(ctx,"Push","alloy.push_prompt"),Fn("push_prompt"),(),s != ()),button(ctx,shortcut_label(ctx,"Tag…","alloy.tag"),Fn("tag_prompt"),(),s != ())
+        ]).with_style(style().gap(px(8)))
     ]).with_style(style().padding_x(px(10)).padding_y(px(4)).gap(px(16)).items_center().justify_between());
     let pathbar = row([
         overlay(text(if s == () {"Projects ▾"} else {`${file_name(s.root)}  ·  ${s.branch}  ▾`}).with_style(style().min_width(px(280)).padding_x(px(10)).padding_y(px(5)).background(theme_color("surface_raised")).hover(style().background(theme_color("surface_hover")))),project_menu(ctx),#{id:"projects-dropdown",kind:"popover",placement:"bottom",open:ctx.get_state("projects_open"),gap:4,modal:false,dismiss_on_escape:true,dismiss_on_outside:true,match_trigger_width:false,initial_focus:"first"}).on_open_change(Fn("projects_toggle")).disabled(ctx.get_state("busy")),
