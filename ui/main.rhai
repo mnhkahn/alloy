@@ -691,12 +691,10 @@ fn project_menu(ctx) {
     let s = ctx.get_state("snapshot");
     for p in project_list(ctx) {
         let active = s != () && s.root == p.root;
-        let counts = if p.error != "" {"Repository unavailable · choose to retry"} else {
-            `${p.files} changed files / to commit  ·  +${p.added} added  ~${p.modified} modified  −${p.deleted} deleted  ·  ${p.staged} staged  ·  ${p.conflicts} conflicts  ·  ` + if p.upstream == "" {"No upstream"} else {`↑ ${p.ahead} to push   ↓ ${p.behind} to pull`}
-        };
+        let counts=if p.error!="" {text("! Repository unavailable · choose to retry").with_style(style().text_color(theme_color("danger")).font_weight(600))} else {git_metrics(`project-status-${p.root}`,p)};
         nodes.push(column([
             row([text(if active {`✓ ${p.name}`} else {p.name}).with_style(style().font_weight(600)),small(p.branch),small(p.root)]).with_style(style().gap(px(12)).items_center()),
-            small(counts)
+            counts
         ]).with_key(`project-${p.root}`).with_style(style().padding_x(px(12)).padding_y(px(6)).gap(px(2)).background(if active {theme_color("selection")} else {theme_color("surface_raised")}).hover(style().background(theme_color("surface_hover"))))
         .tab_index(0).on_key_value("enter",Fn("project_choose"),p.root).accessibility_label(`Open project ${p.root}`).on_click_value(Fn("project_choose"),p.root).disabled(ctx.get_state("busy") || ctx.get_state("selecting")));
     }
@@ -832,8 +830,30 @@ fn history_view(ctx,s) {column([history_diff_view(ctx),history_panel(ctx,s)]).wi
 
 fn status_metric(key,symbol,count,label,color) {
     let description=`${label}: ${count}`;
-    tooltip::Tooltip(#{key:key,label:description,trigger:text(`${symbol}${count}`).accessibility_label(description).with_style(style().font_family("Menlo").whitespace_nowrap().text_color(if count>0 {color} else {theme_color("text_muted")})),content:text(description),placement:"top"}).with_style(style().flex_shrink(false))
+    let metric_style=style().font_family("Menlo").whitespace_nowrap().font_weight(if count>0 {700} else {400}).padding_x(px(4)).padding_y(px(1)).radius(px(3)).border(px(1));
+    metric_style=metric_style.text_color(if count>0 {color} else {theme_color("text_muted")}).border_color(if count>0 {color} else {rgba(0x00000000)}).background(if count>0 {theme_color("surface")} else {rgba(0x00000000)});
+    let trigger=text(`${symbol}${count}`).accessibility_label(description).with_style(metric_style);
+    tooltip::Tooltip(#{key:key,label:description,trigger:trigger,content:text(description),placement:"top"}).with_style(style().flex_shrink(false))
 }
+fn git_metrics(key,p) {
+    let metrics=[
+        status_metric(`${key}-changes`,"Δ",p.files,"未提交文件",theme_color("warning")),
+        status_metric(`${key}-added`,"+",p.added,"新增文件",theme_color("success")),
+        status_metric(`${key}-modified`,"~",p.modified,"修改文件",theme_color("accent")),
+        status_metric(`${key}-deleted`,"−",p.deleted,"删除文件",theme_color("danger")),
+        status_metric(`${key}-staged`,"✓",p.staged,"已暂存文件",theme_color("success"))
+    ];
+    if p.conflicts>0 {metrics.push(status_metric(`${key}-conflicts`,"!",p.conflicts,"冲突文件",theme_color("danger")));}
+    metrics.push(small("│"));
+    if p.upstream=="" {
+        metrics.push(tooltip::Tooltip(#{key:`${key}-sync-unconfigured`,label:"未设置上游分支",trigger:text("⇅ —").accessibility_label("未设置上游分支").with_style(style().font_family("Menlo").text_color(theme_color("text_muted"))),content:text("未设置上游分支"),placement:"top"}));
+    } else {
+        metrics.push(status_metric(`${key}-push`,"↑",p.ahead,`待推送提交 · ${p.upstream} · 最近 Fetch 的远程状态`,theme_color("accent")));
+        metrics.push(status_metric(`${key}-pull`,"↓",p.behind,`待拉取提交 · ${p.upstream} · 最近 Fetch 的远程状态`,theme_color("warning")));
+    }
+    row(metrics).with_key(key).accessibility_label("项目变更和同步状态").with_style(style().font_size(px(11)).line_height(px(16)).flex_shrink(false).items_center().whitespace_nowrap().gap(px(6)))
+}
+
 fn repository_status(ctx, s) {
     if s == () { return row([]); }
     let added=0;let modified=0;let deleted=0;let staged=0;let conflicts=0;
@@ -844,22 +864,7 @@ fn repository_status(ctx, s) {
         if file.index!=" " && file.index!="?" && !file.conflict {staged+=1;}
         if file.conflict {conflicts+=1;}
     }
-    let metrics=[
-        status_metric("repository-changes","Δ",s.files.len(),"未提交文件",theme_color("text_primary")),
-        status_metric("repository-added","+",added,"新增文件",theme_color("success")),
-        status_metric("repository-modified","~",modified,"修改文件",theme_color("accent")),
-        status_metric("repository-deleted","−",deleted,"删除文件",theme_color("danger")),
-        status_metric("repository-staged","✓",staged,"已暂存文件",theme_color("text_primary"))
-    ];
-    if conflicts>0 {metrics.push(status_metric("repository-conflicts","!",conflicts,"冲突文件",theme_color("danger")));}
-    metrics.push(small("│"));
-    if s.upstream=="" {
-        metrics.push(tooltip::Tooltip(#{key:"repository-sync-unconfigured",label:"未设置上游分支",trigger:text("⇅ —").accessibility_label("未设置上游分支").with_style(style().font_family("Menlo").text_color(theme_color("text_muted"))),content:text("未设置上游分支"),placement:"top"}));
-    } else {
-        metrics.push(status_metric("repository-push","↑",s.ahead,`待推送提交 · ${s.upstream} · 最近 Fetch 的远程状态`,theme_color("accent")));
-        metrics.push(status_metric("repository-pull","↓",s.behind,`待拉取提交 · ${s.upstream} · 最近 Fetch 的远程状态`,theme_color("accent")));
-    }
-    row(metrics).with_key("repository-status").accessibility_label("当前项目变更和同步状态").with_style(style().font_size(px(11)).line_height(px(16)).flex_shrink(false).items_center().whitespace_nowrap().gap(px(10)))
+    git_metrics("repository-status",#{files:s.files.len(),added:added,modified:modified,deleted:deleted,staged:staged,conflicts:conflicts,upstream:s.upstream,ahead:s.ahead,behind:s.behind})
 }
 fn status_bar(ctx,s) {
     row([
