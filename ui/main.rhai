@@ -18,6 +18,7 @@ fn state_schema() { #{ fields: #{
     draft: string_field(""), mode: string_field("split"), tab: string_field("work"), confirm: string_field(""),
     hide_unchanged: bool_field(true), mode_open: bool_field(false), whitespace_open: bool_field(false), whitespace: string_field("exact"),
     open_tabs: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
+    updates_available: bool_field(false), updates_can_check: bool_field(false),
     summaries_pending: bool_field(false), summaries_error: string_field(""),
     projects_open: bool_field(false), projects_loading: bool_field(false), add_project: bool_field(false),
     acp_page_open: bool_field(false), acp_select_open: bool_field(false),
@@ -123,13 +124,21 @@ fn request(ctx, op, extra) {
     let repo_root = if op == "open" || op == "clone" || active == () { ctx.get_state("root") } else { active.root };
     let data = #{ op: op, root: repo_root, path: if d == () { "" } else { d.path }, staged: ctx.get_state("tab") == "staged" };
     for key in extra.keys() { data[key] = extra[key]; }
-    ctx.set_state("busy", true); status(ctx, `${op}…`);
+    ctx.set_state("busy", true); sync_update_guard(ctx);status(ctx, `${op}…`);
     ctx.start_task("alloy.git", "execute", data, Fn("loaded"), Fn("failed"));
+}
+fn sync_update_guard(ctx) {let s=ctx.get_state("snapshot");ctx.call_capability("alloy.update","guard",#{blocked:watch_blocked(ctx) || (s!=() && s.merging)});}
+fn check_updates(ctx,payload) {
+    if !guard(ctx) {return;}
+    sync_update_guard(ctx);
+    try {ctx.call_capability("alloy.update","check",());} catch(error) {status(ctx,`${error}`);}
 }
 fn watch_invalidate(ctx) {ctx.set_state("watch_epoch",ctx.get_state("watch_epoch")+1);}
 fn watch_blocked(ctx) {ctx.get_state("busy") || ctx.get_state("selecting") || dirty(ctx) || ctx.get_state("confirm") != ""}
 fn watch_tick(ctx,payload) {
  ctx.set_state("watch_tick_id",ctx.get_state("watch_tick_id")+1);
+ sync_update_guard(ctx);
+ let update_state=ctx.call_capability("alloy.update","status",());ctx.set_state("updates_available",update_state.available);ctx.set_state("updates_can_check",update_state.can_check);
  if ctx.get_state("watch_tick_id") % 12 == 1 {refresh_project_summaries(ctx,());}
  if ctx.get_state("acp_page_open") {return;}
  let s=ctx.get_state("snapshot");
@@ -186,7 +195,7 @@ fn diff_settings(ctx,payload) { let d=ctx.get_state("doc"); if d != () && d.imag
 fn escape_action(ctx,payload) {ctx.set_state("palette","");ctx.set_state("confirm","");ctx.set_state("projects_open",false);ctx.set_state("mode_open",false);ctx.set_state("whitespace_open",false);ctx.set_state("add_project",false);focus_diff(ctx,());}
 fn push_prompt(ctx,payload) {
     if !guard(ctx) || ctx.get_state("snapshot")==() {return;}
-    watch_invalidate(ctx);ctx.set_state("confirm","");ctx.set_state("busy",true);status(ctx,"Push…");
+    watch_invalidate(ctx);ctx.set_state("confirm","");ctx.set_state("busy",true);sync_update_guard(ctx);status(ctx,"Push…");
     ctx.start_task("alloy.git","execute",#{op:"push_prepare",root:ctx.get_state("snapshot").root},Fn("push_prepared"),Fn("failed"));
 }
 fn push_prepared(ctx,result) {
@@ -295,7 +304,7 @@ fn acp_settings_saved(ctx,result) {
 fn acp_settings_failed(ctx,error) {ctx.set_state("busy",false);ctx.set_state("acp_clear_new_fields",false);acp_status(ctx,`保存失败：${error}`);}
 fn save_acp_settings(ctx,agents,selected) {
     if ctx.get_state("busy") {return;}
-    ctx.set_state("busy",true);acp_status(ctx,"正在保存 ACP 配置…");
+    ctx.set_state("busy",true);sync_update_guard(ctx);acp_status(ctx,"正在保存 ACP 配置…");
     ctx.start_task("alloy.git","execute",#{op:"save_acp_settings",acp_agents:agents,selected_acp:selected},Fn("acp_settings_saved"),Fn("acp_settings_failed"));
 }
 fn acp_select_change(ctx,value) {save_acp_settings(ctx,acp_agent_list(ctx),value);}
@@ -329,7 +338,7 @@ fn root_change(ctx, value) { ctx.set_state("root", value); }
 fn url_change(ctx, value) { ctx.set_state("url", value); }
 fn filter_change(ctx, value) { ctx.set_state("filter", value); }
 fn commit_change(ctx, value) { ctx.set_state("commit", value); }
-fn draft_change(ctx, value) { watch_invalidate(ctx); if !ctx.get_state("selecting") { ctx.set_state("draft", value); } }
+fn draft_change(ctx, value) { watch_invalidate(ctx); if !ctx.get_state("selecting") { ctx.set_state("draft", value); } sync_update_guard(ctx); }
 fn open_repo(ctx, payload) { if guard(ctx) { request(ctx, "open", #{}); } }
 fn browse(ctx, payload) { if guard(ctx) { request(ctx, "browse", #{}); } }
 fn clone_repo(ctx, payload) { if guard(ctx) { request(ctx, "clone", #{url:ctx.get_state("url")}); } }
@@ -364,7 +373,7 @@ fn select_file(ctx, path, staged) {
     let old_path = "";
     for file in ctx.get_state("snapshot").files { if file.path == path { old_path = file.old_path; } }
     let id = ctx.get_state("selection_id") + 1;
-    ctx.set_state("selection_id", id); ctx.set_state("pending_path", path); ctx.set_state("selecting", true);
+    ctx.set_state("selection_id", id); ctx.set_state("pending_path", path); ctx.set_state("selecting", true);sync_update_guard(ctx);
     ctx.start_task("alloy.git", "execute", #{op:"select", root:ctx.get_state("snapshot").root, path:path, old_path:old_path, staged:staged, selection_id:id}, Fn("selected"), Fn("selection_failed"));
 }
 fn select(ctx, path) { select_file(ctx, path, ctx.get_state("tab") == "staged"); }
@@ -738,7 +747,7 @@ fn history_request(ctx,op,extra) {
     let s=ctx.get_state("snapshot");if s==() {return;}
     watch_invalidate(ctx);
     let data=#{op:op,root:s.root};for key in extra.keys() {data[key]=extra[key];}
-    ctx.set_state("busy",true);status(ctx,"Loading Git history…");
+    ctx.set_state("busy",true);sync_update_guard(ctx);status(ctx,"Loading Git history…");
     ctx.start_task("alloy.git","execute",data,Fn("history_loaded"),Fn("history_failed"));
 }
 fn history_failed(ctx,error) {ctx.set_state("busy",false);status(ctx,`${error}`);}
@@ -888,7 +897,7 @@ fn view(ctx) {
         text("Alloy").with_style(style().font_size(px(14)).font_weight(700)),
         small(if s == () {"A home for your changes"} else {`${s.branch}  ·  ${s.upstream}`}),
         row([
-            button(ctx,"Log",Fn("history_toggle"),(),s != ()).with_style(style().background(if ctx.get_state("log_mode") {theme_color("selection")} else {theme_color("surface_raised")})),button(ctx,shortcut_label(ctx,"Refresh","alloy.refresh"),Fn("refresh"),(),s != ()),button(ctx,shortcut_label(ctx,"Fetch","alloy.fetch"),Fn("fetch"),(),s != ()),button(ctx,shortcut_label(ctx,"Pull","alloy.pull_prompt"),Fn("pull_prompt"),(),s != ()),button(ctx,shortcut_label(ctx,"Push","alloy.push_prompt"),Fn("push_prompt"),(),s != ()),button(ctx,shortcut_label(ctx,"Tag…","alloy.tag"),Fn("tag_prompt"),(),s != ())
+            button(ctx,"Log",Fn("history_toggle"),(),s != ()).with_style(style().background(if ctx.get_state("log_mode") {theme_color("selection")} else {theme_color("surface_raised")})),button(ctx,shortcut_label(ctx,"Refresh","alloy.refresh"),Fn("refresh"),(),s != ()),button(ctx,shortcut_label(ctx,"Fetch","alloy.fetch"),Fn("fetch"),(),s != ()),button(ctx,shortcut_label(ctx,"Pull","alloy.pull_prompt"),Fn("pull_prompt"),(),s != ()),button(ctx,shortcut_label(ctx,"Push","alloy.push_prompt"),Fn("push_prompt"),(),s != ()),button(ctx,shortcut_label(ctx,"Tag…","alloy.tag"),Fn("tag_prompt"),(),s != ()),button(ctx,"Updates…",Fn("check_updates"),(),ctx.get_state("updates_available") && ctx.get_state("updates_can_check") && (s==() || !s.merging))
         ]).with_style(style().gap(px(8)))
     ]).with_style(style().padding_x(px(10)).padding_y(px(4)).gap(px(16)).items_center().justify_between());
     let pathbar = row([

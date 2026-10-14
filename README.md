@@ -24,6 +24,16 @@ scripts/package.sh             # dist/Alloy.app (local ad-hoc signature)
 scripts/package.sh debug       # faster local development bundle
 ```
 
+## Automatic updates
+
+Packaged Alloy apps embed Sparkle 2.10.0, a free macOS updater. Updates… checks manually; automatic checks run hourly and download signed updates in the background. Sparkle installs to the existing app location when you quit, with macOS authorization if that location requires it. A requested update restart waits while a draft is unsaved, Git/ACP work is in flight, a confirmation is open, or a merge is unfinished. Native update dialogs provide installation and download errors. Development launches without an app bundle disable the update button.
+
+The Release workflow builds architecture-specific ZIP archives plus `appcast-arm64.xml` and `appcast-x86_64.xml`, hosted at GitHub's latest Release asset URLs. The application embeds `assets/update-public-key.txt`. Update archives and appcasts both require Ed25519 signatures and verification before extraction; the private key is held in the repository's `SPARKLE_PRIVATE_KEY` Actions secret. Preserve that key across releases. Locally, the signing key is stored in the login Keychain under Sparkle account `com.mnhkahn.alloy`. Never commit an exported private key.
+
+One initial installation of a version containing the updater is required. Older releases without an appcast cannot supply automatic updates; the next release containing these changes starts the feed. Manual checks report a missing release appcast explicitly instead of showing Sparkle's generic retrieval error. Release tags must increase the bundle version. Sparkle's SDK download is pinned by SHA-256 in `scripts/prepare-sparkle.sh`; its license is bundled in the app.
+
+Sparkle does not require a paid Apple developer account. Public releases currently use an ad-hoc macOS code signature. Removing Apple's unidentified-developer/notarization warnings reliably requires Developer ID signing and Apple notarization; the updater does not disable Gatekeeper or remove quarantine attributes.
+
 ## Workflow
 
 - **Review:** diff views show the full file path above the content, with a hover tooltip for truncated paths and old → new paths for renames. Browse changed files, filter filenames, and switch split/unified views. Local changes compares HEAD with the working tree, including staged and unstaged edits together. Use Staging… for the index/HEAD comparison. All context is visible. The native DiffViewer supports syntax highlighting, line numbers, selection, copy, search (`⌘F`), and previous/next difference (`⌥↑`/`⌥↓`).

@@ -21,6 +21,18 @@ struct Handler {
 }
 impl ScriptViewExtension for GitExtension {
     fn configure_runtime(&self, runtime: &mut UiRuntimeState) -> Result<(), String> {
+        runtime.capabilities.register(
+            CapabilityDescriptor {
+                id: CapabilityId::parse("alloy.update").map_err(|e| e.to_string())?,
+                version: semver::Version::new(1, 0, 0),
+                methods: BTreeMap::from([
+                    ("status".into(), CapabilityMethod {input:ValueSchema::Null, output:ValueSchema::UiValue}),
+                    ("check".into(), CapabilityMethod {input:ValueSchema::Null, output:ValueSchema::UiValue}),
+                    ("guard".into(), CapabilityMethod {input:ValueSchema::UiValue, output:ValueSchema::UiValue}),
+                ]),
+            },
+            UpdateCapabilities {disabled:self.fixture.is_some()},
+        ).map_err(|e| e.to_string())?;
         runtime
             .assets
             .register("preview", PreviewAssets)
@@ -536,5 +548,18 @@ mod merge_tests {
                 .starts_with("Merge")
         );
         assert!(repo.commit("too early").is_err());
+    }
+}
+
+struct UpdateCapabilities { disabled: bool }
+impl CapabilityHandler for UpdateCapabilities {
+    fn call(&mut self, method: &str, input: UiValue) -> Result<UiValue, String> {
+        if self.disabled {return Ok(to_ui(json!({"available":false,"can_check":false})));}
+        match method {
+            "status" => Ok(to_ui(json!({"available":crate::updater::available(),"can_check":crate::updater::can_check()}))),
+            "guard" => {crate::updater::set_blocked(flag(&from_ui(input), "blocked")); Ok(UiValue::Null)},
+            "check" => {crate::updater::check()?; Ok(UiValue::Null)},
+            _ => Err("Unknown update action".into()),
+        }
     }
 }

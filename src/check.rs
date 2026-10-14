@@ -53,6 +53,8 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
     AppManifest::new(ModuleId::parse("main").unwrap())
         .with_capability("alloy.boot", "*")
         .map_err(error)?
+        .with_capability("alloy.update", "*")
+        .map_err(error)?
         .with_capability("alloy.git", "*")
         .map_err(error)?
         .activate(&mut runtime.capabilities)

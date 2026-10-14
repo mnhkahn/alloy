@@ -29,6 +29,9 @@ name = "alloy"
 path = "src/main.rs"
 required-features = ["gui"]
 
+[build-dependencies]
+cc = "1"
+
 [profile.dev]
 debug = 0
 

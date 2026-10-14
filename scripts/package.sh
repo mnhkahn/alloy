@@ -2,6 +2,7 @@
 set -eu
 cd "$(dirname "$0")/.."
 sh scripts/prepare-dependency.sh
+sh scripts/prepare-sparkle.sh
 profile="${1:-release}"
 version=$(python3 scripts/bundle-info.py --version "${2:-}")
 if [ "$profile" = "release" ]; then
@@ -25,7 +26,11 @@ for spec in "16 icon_16x16" "32 icon_16x16@2x" "32 icon_32x32" "64 icon_32x32@2x
     sips -z "$1" "$1" assets/alloy-logo.png --out "$iconset/$2.png" >/dev/null
 done
 iconutil -c icns "$iconset" -o "$bundle/Contents/Resources/AppIcon.icns"
-python3 scripts/bundle-info.py --version "$version" --output "$bundle/Contents/Info.plist"
+arch=$(lipo -archs "$bundle/Contents/MacOS/Alloy")
+python3 scripts/bundle-info.py --version "$version" --arch "$arch" --output "$bundle/Contents/Info.plist"
+mkdir -p "$bundle/Contents/Frameworks"
+ditto target/sparkle-sdk/Sparkle.framework "$bundle/Contents/Frameworks/Sparkle.framework"
+cp target/sparkle-sdk/LICENSE "$bundle/Contents/Resources/Sparkle-LICENSE.txt"
 codesign --force --deep --sign - "$bundle"
 codesign --verify --deep --strict "$bundle"
 echo "Built $bundle ($version)"

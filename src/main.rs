@@ -2,6 +2,7 @@ mod app_icon;
 mod bridge;
 mod check;
 mod shortcuts;
+mod updater;
 use gpui_rhai::{
     ActionId, AppManifest, EmbeddedScriptSource, EmbeddedScriptView, KeyBindingSpec, ModuleId,
     ScriptApplication,
@@ -57,6 +58,8 @@ fn prepare(
     let manifest = AppManifest::new(entry.clone())
         .with_capability("alloy.boot", "*")
         .unwrap()
+        .with_capability("alloy.update", "*")
+        .unwrap()
         .with_capability("alloy.git", "*")
         .unwrap();
     let mut view = EmbeddedScriptView::new(
@@ -85,6 +88,18 @@ fn prepare(
 }
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|v| v=="--updater-probe") {
+        #[cfg(target_os = "macos")]
+        #[allow(deprecated)]
+        unsafe {
+            use cocoa::{appkit::NSApplication, base::nil};
+            NSApplication::sharedApplication(nil);
+        }
+        updater::start();
+        if updater::available() {println!("Sparkle updater initialized successfully");}
+        else {eprintln!("Updater is unavailable in this bundle");std::process::exit(1);}
+        return;
+    }
     let check = args.first().is_some_and(|v| v == "--check");
     let initial = args
         .iter()
@@ -117,6 +132,7 @@ fn main() {
                 .window_size(1440.0, 900.0)
                 .window_options(|mut options, _| {
                     app_icon::install();
+                    updater::start();
                     if let Some(titlebar) = options.titlebar.as_mut() {
                         titlebar.title = Some("Alloy".into());
                     }

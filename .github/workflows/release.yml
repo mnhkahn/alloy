@@ -34,6 +34,7 @@ jobs:
     env:
       MACOSX_DEPLOYMENT_TARGET: '12.0'
       RELEASE_ARCH: ${{ matrix.arch }}
+      ALLOY_UPDATE_REPOSITORY: ${{ github.repository }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -51,6 +52,8 @@ jobs:
         with:
           workspaces: alloy
           key: release-${{ matrix.arch }}
+      - name: Test native update restart guard
+        run: sh scripts/test-updater.sh
       - name: Build release app
         run: |
           version=$(python3 scripts/bundle-info.py --version "$RELEASE_TAG")
@@ -62,6 +65,21 @@ jobs:
           archive="Alloy-${RELEASE_VERSION}-macOS-${RELEASE_ARCH}.zip"
           ditto -c -k --sequesterRsrc --keepParent dist/Alloy.app "release-assets/$archive"
           (cd release-assets && shasum -a 256 "$archive" > "$archive.sha256")
+      - name: Sign update archive and appcast
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          if [ -z "$SPARKLE_PRIVATE_KEY" ]; then
+            echo "Configure the repository SPARKLE_PRIVATE_KEY secret before releasing." >&2
+            exit 1
+          fi
+          printf '%s' "$SPARKLE_PRIVATE_KEY" | target/sparkle-sdk/bin/generate_appcast \
+            --ed-key-file - \
+            --maximum-deltas 0 \
+            --download-url-prefix "https://github.com/${ALLOY_UPDATE_REPOSITORY}/releases/download/${RELEASE_TAG}/" \
+            -o "release-assets/appcast-${RELEASE_ARCH}.xml" release-assets
+          printf '%s' "$SPARKLE_PRIVATE_KEY" | target/sparkle-sdk/bin/sign_update \
+            --verify --ed-key-file - "release-assets/appcast-${RELEASE_ARCH}.xml"
       - uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.arch }}
