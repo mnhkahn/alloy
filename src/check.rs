@@ -577,6 +577,72 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
         assert_eq!(get("log_mode"), UiValue::Bool(false));
         assert_eq!(get("doc"), work_doc);
         assert_eq!(get("draft"), work_draft);
+        // Push UI tests use a nonexistent root, so no real remote can be contacted.
+        let real_snapshot = get("snapshot");
+        let mut push_snapshot = if let UiValue::Map(fields) = real_snapshot.clone() {
+            fields
+        } else {
+            unreachable!()
+        };
+        push_snapshot.insert(
+            "root".into(),
+            UiValue::String("/alloy-test/push-ui-only".into()),
+        );
+        let load_push_context = |snapshot| {
+            UiValue::Map(BTreeMap::from([
+                ("ok".into(), UiValue::Bool(true)),
+                ("message".into(), UiValue::String("Push UI test".into())),
+                ("snapshot".into(), snapshot),
+                ("document".into(), work_doc.clone()),
+            ]))
+        };
+        call(
+            &engine,
+            &mut life,
+            "loaded",
+            load_push_context(UiValue::Map(push_snapshot)),
+        )?;
+        call(
+            &engine,
+            &mut life,
+            "push_prepared",
+            UiValue::Map(BTreeMap::from([
+                ("ok".into(), UiValue::Bool(true)),
+                ("needs_upstream".into(), UiValue::Bool(true)),
+            ])),
+        )?;
+        assert_eq!(get("confirm"), UiValue::String("push".into()));
+        assert_eq!(get("busy"), UiValue::Bool(false));
+        call(&engine, &mut life, "cancel", UiValue::Null)?;
+        call(
+            &engine,
+            &mut life,
+            "push_prepared",
+            UiValue::Map(BTreeMap::from([
+                ("ok".into(), UiValue::Bool(true)),
+                ("needs_upstream".into(), UiValue::Bool(false)),
+            ])),
+        )?;
+        assert_eq!(get("confirm"), UiValue::String(String::new()));
+        assert_eq!(
+            get("busy"),
+            UiValue::Bool(true),
+            "Configured upstream must dispatch push directly"
+        );
+        assert_eq!(get("doc"), work_doc);
+        assert_eq!(get("draft"), work_draft);
+        call(
+            &engine,
+            &mut life,
+            "failed",
+            UiValue::String("Simulated push completion".into()),
+        )?;
+        call(
+            &engine,
+            &mut life,
+            "loaded",
+            load_push_context(real_snapshot),
+        )?;
         life.render(&mut engine).map_err(error)?;
     }
     // Completion must retain the full generated message in the read-only box,

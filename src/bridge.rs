@@ -243,6 +243,10 @@ fn execute(data: &Value, initial: &str) -> Result<Value, String> {
         }
         _ => Repository::open(string(data, "root"))?,
     };
+    if op == "push_prepare" {
+        repo.head_sha()?;
+        return Ok(json!({"ok":true,"needs_upstream":!repo.has_upstream()?}));
+    }
     if matches!(op, "history" | "history_commit" | "history_diff") {
         let mut result = json!({"ok":true,"history_op":op,"history_root":repo.root.to_string_lossy(),"history_id":data["commit_id"],"history_skip":data["skip"]});
         match op {
@@ -400,6 +404,9 @@ fn execute(data: &Value, initial: &str) -> Result<Value, String> {
             }
         }
         "fetch" | "pull" | "push" => {
+            if op == "push" && !flag(data, "allow_upstream") && !repo.has_upstream()? {
+                return Err("The upstream configuration changed. Click Push again to confirm its setup.".into());
+            }
             message = repo.network(op)?;
             if message.trim().is_empty() {
                 message = format!("{op} completed");

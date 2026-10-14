@@ -1250,3 +1250,18 @@ fn abort_merge_restores_local_commit_and_keeps_new_files() {
     assert_eq!(fs::read(r.root.join("keep-new.txt")).unwrap(), b"keep");
     assert!(r.abort_merge().is_err());
 }
+
+#[test]
+fn upstream_detection_uses_configuration_even_without_a_tracking_ref() {
+    let (_dir, r) = fixture();
+    assert!(!r.has_upstream().unwrap());
+    git(&r.root, &["remote", "add", "origin", "/alloy-test/missing-remote"]);
+    git(&r.root, &["config", "branch.main.remote", "origin"]);
+    git(&r.root, &["config", "branch.main.merge", "refs/heads/main"]);
+    assert!(r.snapshot().unwrap().upstream.is_empty());
+    assert!(r.has_upstream().unwrap());
+    git(&r.root, &["config", "--unset", "branch.main.merge"]);
+    assert!(!r.has_upstream().unwrap());
+    git(&r.root, &["checkout", "--detach"]);
+    assert!(r.has_upstream().is_err());
+}

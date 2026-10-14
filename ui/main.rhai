@@ -184,9 +184,19 @@ fn focus_diff(ctx,payload) { let d=ctx.get_state("doc"); if d != () && d.images 
 fn edit_focus(ctx,payload) {let d=ctx.get_state("doc"); if d != () && d.editable && !ctx.get_state("busy") && !ctx.get_state("selecting") {ctx.set_state("editor",true);ctx.set_state("focus_editor_id",ctx.get_state("focus_editor_id")+1);} }
 fn diff_settings(ctx,payload) { let d=ctx.get_state("doc"); if d != () && d.images == () {ctx.set_state("mode_open",true);} }
 fn escape_action(ctx,payload) {ctx.set_state("palette","");ctx.set_state("confirm","");ctx.set_state("projects_open",false);ctx.set_state("mode_open",false);ctx.set_state("whitespace_open",false);ctx.set_state("add_project",false);focus_diff(ctx,());}
-fn push_prompt(ctx,payload) {if guard(ctx) && ctx.get_state("snapshot") != () {ctx.set_state("confirm","push");}}
+fn push_prompt(ctx,payload) {
+    if !guard(ctx) || ctx.get_state("snapshot")==() {return;}
+    watch_invalidate(ctx);ctx.set_state("confirm","");ctx.set_state("busy",true);status(ctx,"Push…");
+    ctx.start_task("alloy.git","execute",#{op:"push_prepare",root:ctx.get_state("snapshot").root},Fn("push_prepared"),Fn("failed"));
+}
+fn push_prepared(ctx,result) {
+    ctx.set_state("busy",false);
+    if !result.ok {status(ctx,result.message);return;}
+    if result.needs_upstream {ctx.set_state("confirm","push");status(ctx,"No upstream configured · confirm the first push");}
+    else {request(ctx,"push",#{allow_upstream:false});}
+}
 fn pull_prompt(ctx,payload) {if guard(ctx) && ctx.get_state("snapshot") != () {ctx.set_state("confirm","pull");}}
-fn network_confirm(ctx,payload) {let op=ctx.get_state("confirm");if op == "push" || op == "pull" {ctx.set_state("confirm","");network(ctx,op);}}
+fn network_confirm(ctx,payload) {if !guard(ctx) {return;}let op=ctx.get_state("confirm");if op == "push" {ctx.set_state("confirm","");request(ctx,"push",#{allow_upstream:true});} else if op == "pull" {ctx.set_state("confirm","");network(ctx,op);}}
 fn commit_shortcut(ctx,payload) {if ctx.get_state("snapshot") != () && has_message(ctx) && selected_count(ctx)>0 {commit(ctx,());} else {status(ctx,"Stage changes and enter a commit message first.");}}
 fn ai_commit(ctx,payload) {if guard(ctx) && ctx.get_state("snapshot") != () {request(ctx,"ai_commit",#{});}}
 fn palette_open(ctx,mode) {ctx.set_state("palette_query","");ctx.set_state("palette",mode);}
@@ -529,7 +539,7 @@ fn confirmation(ctx) {
     if c == "tag" { return tag_bump_bar(ctx); }
     if c == "tag-go" { return tag_go_bar(ctx); }
     if c == "tag-retry" { return tag_retry_bar(ctx); }
-    let label = if c == "abort-merge" {"Abort this Git merge and restore the pre-merge state?"} else if c == "rollback-all" {"Roll back all committed files to HEAD? New files will be kept."} else if c == "rollback" {`Roll back ${ctx.get_state("rollback_path")} to HEAD?`} else if c == "push" {"Push local commits? If no upstream is configured, automatically set it on the selected push remote."} else if c == "pull" {"Pull and merge changes from the configured upstream?"} else if c == "close" {"Close Alloy and discard unsaved work? An in-flight Git operation may still finish."} else if c == "delete" {"Delete this conflicted file and stage the deletion?"} else {"Discard your unsaved draft?"};
+    let label = if c == "abort-merge" {"Abort this Git merge and restore the pre-merge state?"} else if c == "rollback-all" {"Roll back all committed files to HEAD? New files will be kept."} else if c == "rollback" {`Roll back ${ctx.get_state("rollback_path")} to HEAD?`} else if c == "push" {"No upstream is configured. Push this branch and set its upstream on the configured push remote?"} else if c == "pull" {"Pull and merge changes from the configured upstream?"} else if c == "close" {"Close Alloy and discard unsaved work? An in-flight Git operation may still finish."} else if c == "delete" {"Delete this conflicted file and stage the deletion?"} else {"Discard your unsaved draft?"};
     let handler = if c == "abort-merge" {Fn("abort_merge_now")} else if c == "rollback" || c == "rollback-all" {Fn("rollback_now")} else if c == "push" || c == "pull" {Fn("network_confirm")} else if c == "close" {Fn("close_now")} else if c == "delete" {Fn("delete_now")} else {Fn("discard_now")};
     row([text(label),button(ctx,"Confirm",handler,(),true),button(ctx,"Cancel",Fn("cancel"),(),true)])
         .with_style(style().padding(px(12)).gap(px(10)).items_center().background(theme_color("selection")))
@@ -589,8 +599,7 @@ fn sidebar(ctx,s) {
     if ctx.get_state("advanced") && !s.merging { footer.push(button(ctx,"Commit staged index",Fn("commit_index"),(),has_message(ctx))); }
     footer.push(row([button(ctx,shortcut_label(ctx,"Commit","alloy.ai_commit"),Fn("ai_commit"),(),true),acp_agent_selector(ctx)]).with_style(style().gap(px(8)).items_center()));
     column([
-        row([text(if s.merging {"Merge"} else {"Commit"}).with_style(style().font_size(px(14)).font_weight(600)),button(ctx,shortcut_label(ctx,"Refresh","alloy.refresh"),Fn("refresh"),(),true),button(ctx,if ctx.get_state("advanced") {"Hide staging"} else {"Staging…"},Fn("staging_toggle"),(),true)]).with_style(style().padding_x(px(6)).gap(px(6)).items_center()),
-        row([button(ctx,"Rollback all",Fn("rollback_all"),(),!s.merging && s.files.len()>0)]).with_style(style().padding_x(px(6)).gap(px(6)).items_center()),
+        row([text(if s.merging {"Merge"} else {"Commit"}).with_style(style().font_size(px(14)).font_weight(600)),button(ctx,"Refresh",Fn("refresh"),(),true),button(ctx,"Rollback all",Fn("rollback_all"),(),!s.merging && s.files.len()>0),button(ctx,if ctx.get_state("advanced") {"Hide staging"} else {"Staging…"},Fn("staging_toggle"),(),true)]).with_style(style().padding_x(px(6)).gap(px(6)).items_center()),
         input::Input(#{key:`filter-${ctx.get_state("focus_filter_id")}`,autofocus:ctx.get_state("focus_filter_id")>0,label:"Filter changed files",value:ctx.get_state("filter"),placeholder:"Filter files…",on_change:Fn("filter_change"),part_styles:#{input:style().height(px(26)).font_size(px(12))}}),
         column(items).with_key("file-list").with_style(style().flex_grow().min_height(px(0)).overflow_y_scroll()),
         column(footer).with_style(style().border_top(px(1)).border_color(theme_color("border")).padding_top(px(6)).gap(px(5)))

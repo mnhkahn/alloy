@@ -1016,6 +1016,17 @@ impl Repository {
             .map_err(|e| format!("Commit succeeded, but publishing the index failed: {e}"))?;
         Ok(output)
     }
+    pub fn has_upstream(&self) -> Result<bool> {
+        let branch = self
+            .cmd(&["symbolic-ref", "--quiet", "--short", "HEAD"])
+            .map_err(|_| "Cannot push from detached HEAD. Check out a branch first.".to_string())?;
+        let reference = format!("refs/heads/{}", branch.trim());
+        // Configuration is valid even before the tracking ref has been fetched.
+        Ok(!self
+            .cmd(&["for-each-ref", "--format=%(upstream)", &reference])?
+            .trim()
+            .is_empty())
+    }
     fn push(&self) -> Result<String> {
         let branch = self
             .cmd(&["symbolic-ref", "--quiet", "--short", "HEAD"])
