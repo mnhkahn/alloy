@@ -1051,3 +1051,202 @@ fn status_reads_do_not_rewrite_index_stat_cache() {
     assert!(r.clean().unwrap());
     assert_eq!(fs::read(&index_path).unwrap(), index);
 }
+
+#[test]
+fn committed_changes_are_selected_again_on_refresh() {
+    let (_dir, r) = fixture();
+    fs::write(r.root.join("file.txt"), "first edit\n").unwrap();
+    fs::write(r.root.join("new.txt"), "new\n").unwrap();
+    fs::write(r.root.join("staged-new.txt"), "staged new\n").unwrap();
+    r.stage("staged-new.txt").unwrap();
+    r.stage_committed_changes().unwrap();
+    let files = r.snapshot().unwrap().files;
+    assert!(
+        files
+            .iter()
+            .any(|f| f.path == "file.txt" && f.index == "M" && f.work == " ")
+    );
+    assert!(files.iter().any(|f| f.path == "new.txt" && f.index == "?"));
+    r.unstage("file.txt").unwrap();
+    fs::write(r.root.join("file.txt"), "second edit\n").unwrap();
+    r.stage_committed_changes().unwrap();
+    assert_eq!(
+        run(&r.root, &["show", ":file.txt"], None).unwrap(),
+        b"second edit\n"
+    );
+    r.commit("defaults").unwrap();
+    assert!(
+        r.snapshot()
+            .unwrap()
+            .files
+            .iter()
+            .any(|f| f.path == "new.txt")
+    );
+}
+
+#[test]
+fn rollback_all_preserves_new_files_and_their_index_entries() {
+    let (_dir, r) = fixture();
+    fs::write(r.root.join("other.txt"), "original\n").unwrap();
+    git(&r.root, &["add", "other.txt"]);
+    git(&r.root, &["commit", "-m", "other"]);
+    fs::write(r.root.join("file.txt"), "staged edit\n").unwrap();
+    r.stage("file.txt").unwrap();
+    fs::write(r.root.join("file.txt"), "unstaged edit\n").unwrap();
+    fs::remove_file(r.root.join("other.txt")).unwrap();
+    fs::write(r.root.join("new.txt"), "keep\n").unwrap();
+    fs::write(r.root.join("staged-new.txt"), "also keep\n").unwrap();
+    r.stage("staged-new.txt").unwrap();
+    r.rollback(None).unwrap();
+    assert_eq!(
+        fs::read(r.root.join("file.txt")).unwrap(),
+        b"one\ntwo\nthree\n"
+    );
+    assert_eq!(fs::read(r.root.join("other.txt")).unwrap(), b"original\n");
+    assert_eq!(fs::read(r.root.join("new.txt")).unwrap(), b"keep\n");
+    assert_eq!(
+        run(&r.root, &["show", ":staged-new.txt"], None).unwrap(),
+        b"also keep\n"
+    );
+    assert_eq!(r.snapshot().unwrap().files.len(), 2);
+    assert!(r.rollback(Some("new.txt")).is_err());
+    assert!(r.rollback(Some("staged-new.txt")).is_err());
+}
+
+#[test]
+fn rollback_single_rename_and_literal_paths() {
+    let (_dir, r) = fixture();
+    let renamed = ":[renamed] file\n.txt";
+    git(&r.root, &["mv", "file.txt", renamed]);
+    fs::write(r.root.join("new.txt"), "keep").unwrap();
+    r.rollback(Some(renamed)).unwrap();
+    assert!(!r.root.join(renamed).exists());
+    assert_eq!(
+        fs::read(r.root.join("file.txt")).unwrap(),
+        b"one\ntwo\nthree\n"
+    );
+    assert_eq!(fs::read(r.root.join("new.txt")).unwrap(), b"keep");
+    assert_eq!(r.snapshot().unwrap().files.len(), 1);
+}
+
+#[test]
+fn defaults_and_rollback_in_unborn_repository_preserve_everything() {
+    let dir = TempDir::new().unwrap();
+    git(dir.path(), &["init", "-b", "main"]);
+    let r = Repository::open(dir.path().to_str().unwrap()).unwrap();
+    fs::write(r.root.join("new.txt"), "keep").unwrap();
+    r.stage("new.txt").unwrap();
+    r.stage_committed_changes().unwrap();
+    r.rollback(None).unwrap();
+    assert_eq!(fs::read(r.root.join("new.txt")).unwrap(), b"keep");
+    assert_eq!(r.snapshot().unwrap().files[0].index, "A");
+}
+
+#[test]
+fn single_file_rollback_leaves_other_modifications_alone() {
+    let (_dir, r) = fixture();
+    fs::write(r.root.join("other.txt"), "original").unwrap();
+    git(&r.root, &["add", "other.txt"]);
+    git(&r.root, &["commit", "-m", "other"]);
+    fs::write(r.root.join("other.txt"), "keep this edit").unwrap();
+    fs::remove_file(r.root.join("file.txt")).unwrap();
+    r.stage_committed_changes().unwrap();
+    assert_eq!(
+        r.snapshot()
+            .unwrap()
+            .files
+            .iter()
+            .find(|f| f.path == "file.txt")
+            .unwrap()
+            .index,
+        "D"
+    );
+    r.rollback(Some("file.txt")).unwrap();
+    assert_eq!(
+        fs::read(r.root.join("file.txt")).unwrap(),
+        b"one\ntwo\nthree\n"
+    );
+    assert_eq!(
+        fs::read(r.root.join("other.txt")).unwrap(),
+        b"keep this edit"
+    );
+    assert_eq!(
+        run(&r.root, &["show", ":other.txt"], None).unwrap(),
+        b"keep this edit"
+    );
+}
+
+#[test]
+fn pull_conflicts_use_git_stages_and_finish_with_a_two_parent_commit() {
+    let (_dir, local) = fixture();
+    let remote_dir = TempDir::new().unwrap();
+    let remote = remote_dir.path().join("remote.git");
+    git(
+        remote_dir.path(),
+        &["init", "--bare", remote.to_str().unwrap()],
+    );
+    git(
+        &local.root,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git(&local.root, &["push", "-u", "origin", "main"]);
+    let other = remote_dir.path().join("other");
+    git(
+        remote_dir.path(),
+        &[
+            "clone",
+            "-b",
+            "main",
+            remote.to_str().unwrap(),
+            other.to_str().unwrap(),
+        ],
+    );
+    git(&other, &["config", "user.name", "Remote Test"]);
+    git(&other, &["config", "user.email", "remote@example.invalid"]);
+    git(&other, &["config", "commit.gpgsign", "false"]);
+    git(&other, &["config", "core.hooksPath", "/dev/null"]);
+    fs::write(other.join("file.txt"), "one\nremote\nthree\n").unwrap();
+    git(&other, &["commit", "-am", "remote"]);
+    git(&other, &["push"]);
+    fs::write(local.root.join("file.txt"), "one\nlocal\nthree\n").unwrap();
+    git(&local.root, &["commit", "-am", "local"]);
+    assert!(local.network("pull").is_err());
+    assert!(local.snapshot().unwrap().merging);
+    let doc = local.document("file.txt", false).unwrap();
+    assert_eq!(doc.base, "one\ntwo\nthree\n");
+    assert_eq!(doc.ours, "one\nlocal\nthree\n");
+    assert_eq!(doc.theirs, "one\nremote\nthree\n");
+    let message = local.merge_message().unwrap();
+    assert!(message.starts_with("Merge"));
+    assert!(!message.contains("# Conflicts:"));
+    let result = choose_conflict(&doc.right, 0, "both").unwrap();
+    local.resolve(&doc.path, &doc.right, true, &result).unwrap();
+    assert!(!local.snapshot().unwrap().files.iter().any(|f| f.conflict));
+    assert!(local.snapshot().unwrap().merging);
+    local.commit(&message).unwrap();
+    assert!(!local.snapshot().unwrap().merging);
+    let log = alloy::history::list(&local, 0).unwrap();
+    assert_eq!(log.commits[0].parents.len(), 2);
+    assert_eq!(
+        fs::read_to_string(local.root.join("file.txt")).unwrap(),
+        "one\nlocal\nremote\nthree\n"
+    );
+}
+
+#[test]
+fn abort_merge_restores_local_commit_and_keeps_new_files() {
+    let (_dir, r) = fixture();
+    git(&r.root, &["checkout", "-b", "incoming"]);
+    fs::write(r.root.join("file.txt"), "remote\n").unwrap();
+    git(&r.root, &["commit", "-am", "remote"]);
+    git(&r.root, &["checkout", "main"]);
+    fs::write(r.root.join("file.txt"), "local\n").unwrap();
+    git(&r.root, &["commit", "-am", "local"]);
+    assert!(run(&r.root, &["merge", "incoming"], None).is_err());
+    fs::write(r.root.join("keep-new.txt"), "keep").unwrap();
+    r.abort_merge().unwrap();
+    assert!(!r.snapshot().unwrap().merging);
+    assert_eq!(fs::read(r.root.join("file.txt")).unwrap(), b"local\n");
+    assert_eq!(fs::read(r.root.join("keep-new.txt")).unwrap(), b"keep");
+    assert!(r.abort_merge().is_err());
+}

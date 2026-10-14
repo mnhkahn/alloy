@@ -82,6 +82,10 @@ impl AsyncCapabilityHandler for Handler {
         let initial = self.initial.clone();
         let gate = self.gate.clone();
         Ok(TaskWork::new(move || {
+            // Read-only summaries must not queue behind ACP or network operations.
+            if matches!(string(&data, "op"), "projects" | "project_summaries") {
+                return execute(&data, &initial).map(to_ui);
+            }
             let _guard = gate.lock().map_err(|e| e.to_string())?;
             if string(&data, "op") == "watch" {
                 let mut current = watcher.lock().map_err(|e| e.to_string())?;
@@ -120,7 +124,8 @@ impl AsyncCapabilityHandler for Handler {
                             .or_else(|| s.files.first())
                             .and_then(|f| r.comparison_for_entry(f, false, true).ok())
                     });
-                    json!({ "ok": false, "message": error, "snapshot": snapshot, "document": document })
+                    let merge_message = repo.as_ref().zip(snapshot.as_ref()).filter(|(_, s)| s.merging).and_then(|(r, _)| r.merge_message().ok());
+                    json!({ "ok": false, "message": error, "snapshot": snapshot, "document": document, "merge_message": merge_message })
                 }
             };
             Ok(to_ui(output))
@@ -136,8 +141,9 @@ fn flag(v: &Value, key: &str) -> bool {
 fn execute(data: &Value, initial: &str) -> Result<Value, String> {
     let op = string(data, "op");
     let path = string(data, "path");
-    if op == "projects" {
+    if op == "projects" || op == "project_summaries" {
         let projects = alloy::projects::Projects::read(&alloy::projects::store_path()?)?;
+        if op == "project_summaries" { return Ok(json!({"projects":projects.overview()})); }
         return Ok(
             json!({"projects":projects.overview(),"acp_agents":projects.acp_agents,"selected_acp":projects.selected_acp}),
         );
@@ -237,6 +243,15 @@ fn execute(data: &Value, initial: &str) -> Result<Value, String> {
         }
         _ => Repository::open(string(data, "root"))?,
     };
+    if matches!(op, "history" | "history_commit" | "history_diff") {
+        let mut result = json!({"ok":true,"history_op":op,"history_root":repo.root.to_string_lossy(),"history_id":data["commit_id"],"history_skip":data["skip"]});
+        match op {
+            "history" => result["history"] = serde_json::to_value(alloy::history::list(&repo, data["skip"].as_u64().unwrap_or(0) as usize)?).map_err(|e| e.to_string())?,
+            "history_commit" => result["details"] = serde_json::to_value(alloy::history::details(&repo, string(data, "commit_id"))?).map_err(|e| e.to_string())?,
+            _ => result["document"] = serde_json::to_value(alloy::history::diff(&repo, string(data, "commit_id"), path)?).map_err(|e| e.to_string())?,
+        }
+        return Ok(result);
+    }
     if op == "select" {
         let document =
             repo.selected_comparison(path, string(data, "old_path"), flag(data, "staged"), true)?;
@@ -249,7 +264,20 @@ fn execute(data: &Value, initial: &str) -> Result<Value, String> {
     let mut committed = false;
     let mut operation_ok = true;
     match op {
-        "bootstrap" | "open" | "clone" | "browse" | "refresh" => (),
+        "bootstrap" | "open" | "clone" | "browse" => repo.stage_committed_changes()?,
+        "refresh" => {
+            if flag(data, "default_selection") {
+                repo.stage_committed_changes()?;
+            }
+        }
+        "rollback" => {
+            repo.rollback(Some(path))?;
+            message = "File rolled back to HEAD".into();
+        }
+        "rollback_all" => {
+            repo.rollback(None)?;
+            message = "Committed files rolled back; new files preserved".into();
+        }
         "save" => {
             repo.save(
                 path,
@@ -283,6 +311,10 @@ fn execute(data: &Value, initial: &str) -> Result<Value, String> {
         "unstage" => {
             repo.unstage(path)?;
             message = "File unstaged".into();
+        }
+        "abort_merge" => {
+            repo.abort_merge()?;
+            message = "Merge aborted".into();
         }
         "resolve" => {
             repo.resolve(
@@ -376,16 +408,22 @@ fn execute(data: &Value, initial: &str) -> Result<Value, String> {
         _ => return Err("Unknown operation".into()),
     }
     let snapshot = repo.snapshot()?;
-    let selected = snapshot
+    let next_conflict = if matches!(op, "resolve" | "delete") {
+        snapshot.files.iter().find(|f| f.conflict)
+    } else { None };
+    let selected = next_conflict.or_else(|| snapshot
         .files
         .iter()
-        .find(|f| f.path == path)
+        .find(|f| f.path == path))
+        .or_else(|| snapshot.files.iter().find(|f| f.conflict))
         .or_else(|| snapshot.files.first());
     let document = match selected {
         Some(file) => Some(repo.comparison_for_entry(file, flag(data, "staged"), true)?),
         None => None,
     };
-    let mut result = json!({"ok":operation_ok,"message":message,"snapshot":snapshot,"document":document,"overview":alloy::projects::Overview::from_snapshot(&snapshot)});
+    let committed_paths = repo.committed_paths()?;
+    let mut result = json!({"committed_paths":committed_paths,"ok":operation_ok,"message":message,"snapshot":snapshot,"document":document,"overview":alloy::projects::Overview::from_snapshot(&snapshot)});
+    if snapshot.merging { result["merge_message"] = json!(repo.merge_message().unwrap_or_default()); }
     if op == "ai_commit" {
         result["committed"] = json!(committed);
         result["commit_message"] = json!(commit_message);
@@ -447,5 +485,49 @@ impl gpui_rhai::AssetProvider for PreviewAssets {
     fn load(&self, name: &str) -> Result<gpui_rhai::AssetData, String> {
         let (mime_type, bytes) = alloy::preview::load_asset(name)?;
         Ok(gpui_rhai::AssetData { mime_type, bytes })
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+    #[test]
+    fn resolving_a_file_advances_to_the_next_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| alloy::git::run(dir.path(), args, None).unwrap();
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.name", "Merge Test"]);
+        git(&["config", "user.email", "merge@example.invalid"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        git(&["config", "core.hooksPath", "/dev/null"]);
+        for path in ["a.txt", "b.txt"] {
+            std::fs::write(dir.path().join(path), "base\n").unwrap();
+        }
+        git(&["add", "."]);
+        git(&["commit", "-m", "base"]);
+        git(&["checkout", "-b", "incoming"]);
+        for path in ["a.txt", "b.txt"] {
+            std::fs::write(dir.path().join(path), "remote\n").unwrap();
+        }
+        git(&["commit", "-am", "incoming"]);
+        git(&["checkout", "main"]);
+        for path in ["a.txt", "b.txt"] {
+            std::fs::write(dir.path().join(path), "local\n").unwrap();
+        }
+        git(&["commit", "-am", "local"]);
+        assert!(alloy::git::run(dir.path(), &["merge", "incoming"], None).is_err());
+        let repo = Repository::open(dir.path().to_str().unwrap()).unwrap();
+        let doc = repo.document("a.txt", false).unwrap();
+        let response = execute(&json!({"op":"resolve","root":repo.root,"path":doc.path,"expected":doc.right,"exists":true,"content":doc.ours}), "").unwrap();
+        assert_eq!(response["document"]["path"], "b.txt");
+        assert_eq!(response["document"]["conflict"], true);
+        assert_eq!(response["snapshot"]["merging"], true);
+        assert!(
+            response["merge_message"]
+                .as_str()
+                .unwrap()
+                .starts_with("Merge")
+        );
+        assert!(repo.commit("too early").is_err());
     }
 }

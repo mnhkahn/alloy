@@ -1,6 +1,7 @@
 pub mod acp;
 pub mod cmsg;
 pub mod git;
+pub mod history;
 mod git_proxy;
 pub mod llm;
 pub mod preview;

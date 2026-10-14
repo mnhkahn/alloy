@@ -1,3 +1,5 @@
+import "components/context_menu" as context_menu;
+import "components/tooltip" as tooltip;
 import "components/watch_timer" as watch_timer;
 import "components/input" as input;
 import "components/select" as select;
@@ -16,6 +18,7 @@ fn state_schema() { #{ fields: #{
     draft: string_field(""), mode: string_field("split"), tab: string_field("work"), confirm: string_field(""),
     hide_unchanged: bool_field(true), mode_open: bool_field(false), whitespace_open: bool_field(false), whitespace: string_field("exact"),
     open_tabs: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
+    summaries_pending: bool_field(false), summaries_error: string_field(""),
     projects_open: bool_field(false), projects_loading: bool_field(false), add_project: bool_field(false),
     acp_page_open: bool_field(false), acp_select_open: bool_field(false),
     acp_agents: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
@@ -35,6 +38,12 @@ fn state_schema() { #{ fields: #{
     collapsed: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
     tag: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
     tag_choice: string_field(""),
+    log_mode: bool_field(false), history_more: bool_field(false), history_selected: string_field(""), history_file: string_field(""),
+    history_commits: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
+    history_details: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
+    history_doc: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
+    file_menu: string_field(""), rollback_path: string_field(""),
+    committed_paths: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
     busy: bool_field(false), editor: bool_field(false), base_view: bool_field(false),
     snapshot: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
     doc: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } }
@@ -54,15 +63,20 @@ fn prepare_images(ctx, document) {
     document
 }
 fn loaded(ctx, result) {
+    let prior=ctx.get_state("snapshot");
+    let entering_merge=result.snapshot != () && result.snapshot.merging && (prior==() || !prior.merging);
     if "document" in result { result.document = prepare_images(ctx, result.document); }
     ctx.set_state("busy", false);
     status(ctx, result.message);
     if "tag_retry" in result { ctx.set_state("tag",result.tag_retry); ctx.set_state("confirm","tag-retry"); }
     if "overview" in result { let projects = project_list(ctx); let found = false; for i in 0..projects.len() { if projects[i].root == result.overview.root { projects[i] = result.overview; found = true; } } if !found { projects.push(result.overview); } ctx.set_state("projects",projects); }
     if result.snapshot != () {
+        ctx.set_state("file_menu", "");
+        if "committed_paths" in result { ctx.set_state("committed_paths",result.committed_paths); }
         let previous_snapshot = ctx.get_state("snapshot");
         let switched = previous_snapshot == () || previous_snapshot.root != result.snapshot.root;
         if switched {
+            ctx.set_state("log_mode",false);ctx.set_state("history_commits",[]);ctx.set_state("history_details",());ctx.set_state("history_doc",());ctx.set_state("history_file","");ctx.set_state("history_selected","");ctx.set_state("history_more",false);
             let sessions = ctx.get_state("project_sessions"); if sessions == () { sessions = #{}; }
             if previous_snapshot != () { sessions[previous_snapshot.root] = #{commit:ctx.get_state("commit"),filter:ctx.get_state("filter")}; }
             let saved = if result.snapshot.root in sessions {sessions[result.snapshot.root]} else {#{commit:"",filter:""}};
@@ -79,6 +93,8 @@ fn loaded(ctx, result) {
         ctx.set_state("partial",mixed); ctx.set_state("included",current); ctx.set_state("snapshot",result.snapshot);
     }
     if "commit_message" in result && result.commit_message != () {ctx.set_state("commit",result.commit_message);}
+    if "merge_message" in result && result.merge_message != () && (entering_merge || ctx.get_state("commit")=="") {ctx.set_state("commit",result.merge_message);}
+    if result.snapshot != () && result.snapshot.merging && conflict_count(result.snapshot)>0 {ctx.set_state("log_mode",false);ctx.set_state("sidebar_visible",true);}
     if !result.ok {
         if !dirty(ctx) && result.document != () {
             ctx.set_state("doc", result.document); ctx.set_state("draft", result.document.right);
@@ -114,6 +130,8 @@ fn watch_invalidate(ctx) {ctx.set_state("watch_epoch",ctx.get_state("watch_epoch
 fn watch_blocked(ctx) {ctx.get_state("busy") || ctx.get_state("selecting") || dirty(ctx) || ctx.get_state("confirm") != ""}
 fn watch_tick(ctx,payload) {
  ctx.set_state("watch_tick_id",ctx.get_state("watch_tick_id")+1);
+ if ctx.get_state("watch_tick_id") % 12 == 1 {refresh_project_summaries(ctx,());}
+ if ctx.get_state("acp_page_open") {return;}
  let s=ctx.get_state("snapshot");
  if s == () || ctx.get_state("watch_pending") || watch_blocked(ctx) {return;}
  if ctx.get_state("watch_root") != s.root {ctx.set_state("watch_root",s.root);ctx.set_state("watch_seen",0);}
@@ -208,6 +226,22 @@ fn closing(ctx, payload) {
 fn close_now(ctx, payload) { ctx.close_window(ctx.window_id()); }
 fn cancel(ctx, payload) { ctx.set_state("confirm", ""); ctx.set_state("tag", ()); ctx.set_state("tag_choice", ""); }
 fn project_list(ctx) { let value = ctx.get_state("projects"); if value == () {[]} else {value} }
+fn refresh_project_summaries(ctx,payload) {
+    if ctx.get_state("summaries_pending") {return;}
+    ctx.set_state("summaries_pending",true);
+    ctx.start_task("alloy.git","execute",#{op:"project_summaries"},Fn("project_summaries_loaded"),Fn("project_summaries_failed"));
+}
+fn project_summaries_loaded(ctx,result) {
+    ctx.set_state("summaries_pending",false);ctx.set_state("summaries_error","");
+    // Keep the active repository's newer, document-associated snapshot.
+    let s=ctx.get_state("snapshot");let current=();
+    if s!=() {for project in project_list(ctx) {if project.root==s.root {current=project;}}}
+    let projects=[];let found=false;
+    for project in result.projects {if current!=() && project.root==current.root {projects.push(current);found=true;} else {projects.push(project);}}
+    if current!=() && !found {projects.push(current);}
+    ctx.set_state("projects",projects);
+}
+fn project_summaries_failed(ctx,error) {ctx.set_state("summaries_pending",false);ctx.set_state("summaries_error",`Project summaries: ${error}`);}
 fn projects_loaded(ctx, result) {
     ctx.set_state("projects_loading",false); ctx.set_state("projects",result.projects);
     if "acp_agents" in result {ctx.set_state("acp_agents",result.acp_agents);ctx.set_state("selected_acp",result.selected_acp);}
@@ -288,7 +322,19 @@ fn draft_change(ctx, value) { watch_invalidate(ctx); if !ctx.get_state("selectin
 fn open_repo(ctx, payload) { if guard(ctx) { request(ctx, "open", #{}); } }
 fn browse(ctx, payload) { if guard(ctx) { request(ctx, "browse", #{}); } }
 fn clone_repo(ctx, payload) { if guard(ctx) { request(ctx, "clone", #{url:ctx.get_state("url")}); } }
-fn refresh(ctx, payload) { if guard(ctx) && ctx.get_state("snapshot") != () { request(ctx, "refresh", #{}); } }
+fn refresh(ctx, payload) { if ctx.get_state("log_mode") {if guard(ctx) {history_request(ctx,"history",#{skip:0});} return;} if guard(ctx) && ctx.get_state("snapshot") != () { request(ctx, "refresh", #{default_selection:true}); } }
+fn file_menu_open(path, ctx, open) { ctx.set_state("file_menu",if open {path} else {""}); }
+fn can_rollback(ctx, path) { let paths=ctx.get_state("committed_paths"); if paths==() {return false;} for file in ctx.get_state("snapshot").files {if file.path==path {return paths.contains(path) || paths.contains(file.old_path);}} false }
+fn rollback_action(path, ctx, action) {
+    ctx.set_state("file_menu", "");
+    if action == "rollback" && guard(ctx) && can_rollback(ctx,path) {ctx.set_state("rollback_path",path);ctx.set_state("confirm","rollback");}
+}
+fn rollback_all(ctx, payload) { if guard(ctx) {ctx.set_state("confirm","rollback-all");} }
+fn rollback_now(ctx, payload) {
+    if !guard(ctx) {return;}
+    if ctx.get_state("confirm")=="rollback-all" {request(ctx,"rollback_all",#{});}
+    else {request(ctx,"rollback",#{path:ctx.get_state("rollback_path")});}
+}
 fn selection_failed(ctx, error) {
     ctx.set_state("selecting", false); ctx.set_state("pending_path", ""); status(ctx, `${error}`);
 }
@@ -413,7 +459,7 @@ fn previous_file(ctx, payload) { navigate(ctx,-1); }
 fn next_file(ctx, payload) { navigate(ctx,1); }
 fn restore(ctx, number) { request(ctx, "hunk", #{left:ctx.get_state("doc").left,content:ctx.get_state("draft"),number:number}); }
 fn choose(ctx, data) { request(ctx, "choose", #{content:ctx.get_state("draft"),number:data.number,choice:data.choice}); }
-fn accept_file(ctx, side) { let d = ctx.get_state("doc"); ctx.set_state("draft", if side == "ours" {d.ours} else {d.theirs}); ctx.set_state("editor",true); status(ctx,"Replaced the draft with the selected side. Review before marking resolved."); }
+fn accept_file(ctx, side) { let d = ctx.get_state("doc"); if merge_side_deleted(ctx,d,side) {ctx.set_state("confirm","delete");return;} ctx.set_state("draft", if side == "ours" {d.ours} else {d.theirs}); ctx.set_state("editor",true); status(ctx,"Replaced the draft with the selected side. Review before marking resolved."); }
 fn small(value) { text(value).with_style(style().typography("caption").text_color(theme_color("text_muted"))) }
 fn button(ctx, label, handler, payload, enabled) {
     text(label).with_style(style().font_size(px(12)).line_height(px(18)).padding_x(px(7)).padding_y(px(3)).radius(px(3))
@@ -482,8 +528,8 @@ fn confirmation(ctx) {
     if c == "tag" { return tag_bump_bar(ctx); }
     if c == "tag-go" { return tag_go_bar(ctx); }
     if c == "tag-retry" { return tag_retry_bar(ctx); }
-    let label = if c == "push" {"Push local commits? If no upstream is configured, automatically set it on the selected push remote."} else if c == "pull" {"Pull and merge changes from the configured upstream?"} else if c == "close" {"Close Alloy and discard unsaved work? An in-flight Git operation may still finish."} else if c == "delete" {"Delete this conflicted file and stage the deletion?"} else {"Discard your unsaved draft?"};
-    let handler = if c == "push" || c == "pull" {Fn("network_confirm")} else if c == "close" {Fn("close_now")} else if c == "delete" {Fn("delete_now")} else {Fn("discard_now")};
+    let label = if c == "abort-merge" {"Abort this Git merge and restore the pre-merge state?"} else if c == "rollback-all" {"Roll back all committed files to HEAD? New files will be kept."} else if c == "rollback" {`Roll back ${ctx.get_state("rollback_path")} to HEAD?`} else if c == "push" {"Push local commits? If no upstream is configured, automatically set it on the selected push remote."} else if c == "pull" {"Pull and merge changes from the configured upstream?"} else if c == "close" {"Close Alloy and discard unsaved work? An in-flight Git operation may still finish."} else if c == "delete" {"Delete this conflicted file and stage the deletion?"} else {"Discard your unsaved draft?"};
+    let handler = if c == "abort-merge" {Fn("abort_merge_now")} else if c == "rollback" || c == "rollback-all" {Fn("rollback_now")} else if c == "push" || c == "pull" {Fn("network_confirm")} else if c == "close" {Fn("close_now")} else if c == "delete" {Fn("delete_now")} else {Fn("discard_now")};
     row([text(label),button(ctx,"Confirm",handler,(),true),button(ctx,"Cancel",Fn("cancel"),(),true)])
         .with_style(style().padding(px(12)).gap(px(10)).items_center().background(theme_color("selection")))
 }
@@ -497,7 +543,7 @@ fn file_group(file) { if file.conflict {"Merge Conflicts"} else if file.index ==
 fn sidebar(ctx,s) {
     let items = []; let checked = inclusion(ctx); let partial = partials(ctx); let groups = ctx.get_state("collapsed");
     let filter = ctx.get_state("filter").to_lower();
-    for group in ["Changes", "Unversioned Files", "Merge Conflicts"] {
+    for group in ["Merge Conflicts", "Changes", "Unversioned Files"] {
         let files = []; let paths = []; let count = 0; let mixed = false;
         for file in s.files {
             if file_group(file) != group || (filter != "" && !file.path.to_lower().contains(filter)) { continue; }
@@ -526,21 +572,52 @@ fn sidebar(ctx,s) {
                 .accessibility_label(f.path).on_click_value(Fn("select"),f.path).disabled(ctx.get_state("busy"));
             let row_style = style().height(px(26)).min_height(px(26)).flex_shrink(false).padding_left(px(22)).padding_right(px(6)).gap(px(6)).items_center();
             let row_style = row_style.radius(px(3)).background(if selected {theme_color("selection")} else {theme_color("surface_raised")}).hover(style().background(theme_color("surface_hover")));
-            items.push(row([check_box(ctx,`Stage ${f.path}`,f.path in checked && checked[f.path],f.path in partial,Fn("toggle_include"),f.path,!f.conflict && !s.merging),label]).with_key(`file-${f.path}`).with_style(row_style));
+            let file_row = row([check_box(ctx,`Stage ${f.path}`,f.path in checked && checked[f.path],f.path in partial,Fn("toggle_include"),f.path,!f.conflict && !s.merging),label]).with_key(`file-${f.path}`).with_style(row_style);
+            items.push(context_menu::ContextMenu(#{key:`file-menu-${f.path}`,label:`Actions for ${f.path}`,trigger:file_row,open:ctx.get_state("file_menu")==f.path,active_value:"rollback",items:[#{kind:"item",value:"rollback",label:"Rollback",disabled:!can_rollback(ctx,f.path) || s.merging || ctx.get_state("busy") || ctx.get_state("selecting") || dirty(ctx)}],on_open_change:Fn("file_menu_open").curry(f.path),on_action:Fn("rollback_action").curry(f.path)}));
         }
     }
     let can_commit = has_message(ctx) && selected_count(ctx) > 0;
-    let footer = [textarea::Textarea(#{key:`commit-${ctx.get_state("focus_commit_id")}`,autofocus:ctx.get_state("focus_commit_id")>0,label:"Commit message",value:ctx.get_state("commit"),placeholder:"生成的提交信息会显示在这里",read_only:true,min_rows:4,max_rows:10})];
-    if s.merging { footer.push(button(ctx,"Commit merge (staged)",Fn("commit_index"),(),has_message(ctx))); }
+    let footer = [textarea::Textarea(#{key:`commit-${ctx.get_state("focus_commit_id")}`,autofocus:ctx.get_state("focus_commit_id")>0,label:"Commit message",value:ctx.get_state("commit"),placeholder:"生成的提交信息会显示在这里",read_only:!s.merging,on_change:Fn("commit_change"),min_rows:4,max_rows:10})];
+    if s.merging {
+        let unresolved=conflict_count(s);
+        footer.push(small(if unresolved>0 {`${unresolved} conflict files remaining`} else {"All conflicts resolved · commit to finish the merge"}));
+        footer.push(button(ctx,"Commit merge",Fn("commit_index"),(),unresolved==0 && has_message(ctx)));
+        footer.push(button(ctx,"Abort merge…",Fn("abort_merge_prompt"),(),true));
+    }
     else { footer.push(button(ctx,`Commit ${selected_count(ctx)} staged files`,Fn("commit"),(),can_commit)); }
     if ctx.get_state("advanced") && !s.merging { footer.push(button(ctx,"Commit staged index",Fn("commit_index"),(),has_message(ctx))); }
     footer.push(row([button(ctx,shortcut_label(ctx,"Commit","alloy.ai_commit"),Fn("ai_commit"),(),true),acp_agent_selector(ctx)]).with_style(style().gap(px(8)).items_center()));
     column([
-        row([text("Commit").with_style(style().font_size(px(14)).font_weight(600)),button(ctx,shortcut_label(ctx,"Refresh","alloy.refresh"),Fn("refresh"),(),true),button(ctx,if ctx.get_state("advanced") {"Hide staging"} else {"Staging…"},Fn("staging_toggle"),(),true)]).with_style(style().padding_x(px(6)).gap(px(6)).items_center()),
+        row([text(if s.merging {"Merge"} else {"Commit"}).with_style(style().font_size(px(14)).font_weight(600)),button(ctx,shortcut_label(ctx,"Refresh","alloy.refresh"),Fn("refresh"),(),true),button(ctx,if ctx.get_state("advanced") {"Hide staging"} else {"Staging…"},Fn("staging_toggle"),(),true)]).with_style(style().padding_x(px(6)).gap(px(6)).items_center()),
+        row([button(ctx,"Rollback all",Fn("rollback_all"),(),!s.merging && s.files.len()>0)]).with_style(style().padding_x(px(6)).gap(px(6)).items_center()),
         input::Input(#{key:`filter-${ctx.get_state("focus_filter_id")}`,autofocus:ctx.get_state("focus_filter_id")>0,label:"Filter changed files",value:ctx.get_state("filter"),placeholder:"Filter files…",on_change:Fn("filter_change"),part_styles:#{input:style().height(px(26)).font_size(px(12))}}),
         column(items).with_key("file-list").with_style(style().flex_grow().min_height(px(0)).overflow_y_scroll()),
         column(footer).with_style(style().border_top(px(1)).border_color(theme_color("border")).padding_top(px(6)).gap(px(5)))
     ]).with_style(style().width(px(350)).flex_shrink(false).padding(px(6)).gap(px(4)).border_right(px(1)).border_color(theme_color("border")).background(theme_color("surface_raised")))
+}
+fn diff_path_bar(ctx,path,old_path,key) {
+    let root=ctx.get_state("snapshot").root;
+    let full_path=`${root}/${path}`;
+    let label=if old_path=="" {full_path} else {`${root}/${old_path} → ${full_path}`};
+    let trigger=text(label).accessibility_label(`File path: ${label}`).with_style(style().font_size(px(11)).font_family("Menlo").min_width(px(0)).whitespace_nowrap().text_ellipsis().overflow_hidden().text_color(theme_color("text_muted")));
+    let path_node=tooltip::Tooltip(#{key:key,label:label,trigger:trigger,content:text(label),placement:"bottom"}).with_style(style().flex_grow().min_width(px(0)));
+    row([path_node]).with_key(`${key}-bar`).with_style(style().height(px(26)).min_height(px(26)).flex_shrink(false).min_width(px(0)).padding_x(px(10)).items_center().background(theme_color("surface_raised")))
+}
+fn conflict_count(s) {let count=0;for file in s.files {if file.conflict {count+=1;}} count}
+fn merge_markers(ctx) {for line in ctx.get_state("draft").split("\n") {for prefix in ["<<<<<<<","|||||||","=======",">>>>>>>"] {if line.starts_with(prefix) {return true;}}} false}
+fn abort_merge_prompt(ctx,payload) {if guard(ctx) {ctx.set_state("confirm","abort-merge");}}
+fn abort_merge_now(ctx,payload) {if guard(ctx) {request(ctx,"abort_merge",#{});}}
+fn merge_side_deleted(ctx,d,side) {for file in ctx.get_state("snapshot").files {if file.path==d.path && file.conflict {return if side=="ours" {file.index=="D"} else {file.work=="D"};}} false}
+fn merge_source(ctx,d,key,label,source,side) {
+    let header=row([text(label).with_style(style().font_weight(600).flex_grow()),button(ctx,if merge_side_deleted(ctx,d,side) {"Keep deletion"} else if side=="ours" {"Use Local"} else {"Use Incoming"},Fn("accept_file"),side,true)]).with_style(style().height(px(32)).padding_x(px(6)).gap(px(6)).items_center().background(theme_color("surface_raised")));
+    let source_view=code::CodeViewer(#{key:key,source:source,file_name:d.path,label:label,show_line_numbers:true,wrap:"none"}).with_style(style().flex_grow().min_width(px(0)).min_height(px(0)));
+    column([header,source_view]).with_key(`${key}-pane`).with_style(style().flex_basis(px(0)).flex_grow().min_width(px(0)).min_height(px(0)))
+}
+fn merge_view(ctx,d) {
+    let result_header=row([text("RESULT").with_style(style().font_weight(600).flex_grow()),small(if dirty(ctx) {"● Unsaved"} else {"Saved"})]).with_style(style().height(px(32)).padding_x(px(6)).gap(px(6)).items_center().background(theme_color("selection")));
+    let result_editor=textarea::Textarea(#{key:`merge-result-${d.path}`,label:"Final merged version",value:ctx.get_state("draft"),rows:24,on_change:Fn("draft_change"),disabled:ctx.get_state("busy") || ctx.get_state("selecting"),part_styles:#{root:style().flex_grow().min_height(px(0)),editor:style().font_family("Menlo").font_size(px(12)).radius(px(0)).border(px(0)).height(relative(1))}}).with_style(style().flex_grow().min_height(px(0)));
+    let result=column([result_header,result_editor]).with_key("merge-result-pane").with_style(style().flex_basis(px(0)).flex_grow().min_width(px(0)).min_height(px(0)).overflow_y_scroll());
+    row([merge_source(ctx,d,"merge-local","LOCAL",d.ours,"ours"),result,merge_source(ctx,d,"merge-incoming","INCOMING",d.theirs,"theirs")]).with_key("three-way-merge").with_style(style().flex_grow().min_width(px(0)).min_height(px(0)).gap(px(1)))
 }
 fn content(ctx) {
     let d = ctx.get_state("doc");
@@ -556,12 +633,14 @@ fn content(ctx) {
     ];
     toolbar.push(button(ctx,if ctx.get_state("hide_unchanged") {"Show all lines"} else {"Hide unchanged"},Fn("toggle_unchanged"),(),true));
     if d.images != () { toolbar = [button(ctx,"←",Fn("previous_file"),(),true),button(ctx,"→",Fn("next_file"),(),true),small("Image preview"),button(ctx,if ctx.get_state("image_actual") {"Reduced size"} else {"Actual size (100%)"},Fn("image_zoom"),(),true)]; }
+    if d.conflict {toolbar=[button(ctx,"←",Fn("previous_file"),(),true),button(ctx,"→",Fn("next_file"),(),true),small("Merge conflict · edit the center result")];}
     if dirty(ctx) { toolbar.push(button(ctx,"Save",Fn("save"),(),d.editable)); toolbar.push(button(ctx,"Discard",Fn("discard"),(),true)); }
-    if ctx.get_state("advanced") {
+    if ctx.get_state("advanced") && !d.conflict {
         toolbar.push(tab(ctx,"Local","work")); toolbar.push(tab(ctx,"Staged","staged"));
         toolbar.push(button(ctx,"Stage",Fn("stage"),(),!d.conflict)); toolbar.push(button(ctx,"Unstage",Fn("unstage"),(),!d.conflict));
     }
-    let children = [document_tabs(ctx,d),row(toolbar).with_style(style().height(px(34)).flex_shrink(false).gap(px(4)).padding_x(px(6)).items_center().overflow_x_scroll().background(theme_color("surface_raised")))];
+    let old_path="";for file in ctx.get_state("snapshot").files {if file.path==d.path {old_path=file.old_path;}}
+    let children = [document_tabs(ctx,d),diff_path_bar(ctx,d.path,old_path,"work-diff-path"),row(toolbar).with_style(style().height(px(34)).flex_shrink(false).gap(px(4)).padding_x(px(6)).items_center().overflow_x_scroll().background(theme_color("surface_raised")))];
     if d.images != () {
         let panes = [];
         if !d.added { panes.push(image_pane(ctx,`image-left-${d.path}`,d.images.left,"HEAD",false)); }
@@ -570,17 +649,17 @@ fn content(ctx) {
     }
     else if d.note != "" { children.push(text(d.note).with_style(style().padding(px(24)).text_color(theme_color("warning")))); }
     else if d.conflict {
-        children.push(row([small("CONFLICT · Compare both sides, edit the result, then mark resolved."),button(ctx,"Base",Fn("base_toggle"),(),true),button(ctx,"Mark resolved",Fn("resolve"),(),true),button(ctx,"Resolve as deletion",Fn("delete_prompt"),(),true)]).with_style(style().gap(px(6)).items_center()));
-        children.push(viewer(ctx,`conflict-${d.path}`,d.ours,d.theirs,"OURS · index stage 2","THEIRS · index stage 3",d.path,"split"));
+        children.push(row([small("MERGE · Local → Result ← Incoming"),button(ctx,"Base",Fn("base_toggle"),(),true),button(ctx,"Mark resolved",Fn("resolve"),(),!merge_markers(ctx)),button(ctx,"Resolve as deletion",Fn("delete_prompt"),(),true)]).with_style(style().gap(px(6)).items_center().overflow_x_scroll()));
+        children.push(merge_view(ctx,d));
         if ctx.get_state("base_view") {
             children.push(code::CodeViewer(#{key:`base-${d.path}`,source:d.base,file_name:d.path,label:"COMMON ANCESTOR"}).with_style(style().height(px(160))));
         }
-        let actions = [button(ctx,"Use entire ours",Fn("accept_file"),"ours",true),button(ctx,"Use entire theirs",Fn("accept_file"),"theirs",true)];
+        let actions = [];
         let number = 0;
         for line in ctx.get_state("draft").split("\n") {
             if line.starts_with("<<<<<<<") {
                 actions.push(small(`Block ${number+1}`));
-                for choice in ["ours","theirs","both"] { actions.push(button(ctx,choice,Fn("choose"),#{number:number,choice:choice},true)); }
+                for choice in ["ours","theirs","both"] { let label=if choice=="ours" {"Local"} else if choice=="theirs" {"Incoming"} else {"Both"};actions.push(button(ctx,label,Fn("choose"),#{number:number,choice:choice},true)); }
                 number += 1;
             }
         }
@@ -595,7 +674,7 @@ fn content(ctx) {
         if ctx.get_state("whitespace") != "exact" { children.push(small("Choose Do not ignore to select or restore exact change blocks.")); }
 
     }
-    if ctx.get_state("editor") && d.editable { children.push(editor(ctx,d)); }
+    if ctx.get_state("editor") && d.editable && !d.conflict { children.push(editor(ctx,d)); }
     column(children).disabled(ctx.get_state("selecting")).with_style(style().flex_grow().min_width(px(0)).min_height(px(0)))
 }
 fn project_form(ctx) {
@@ -607,7 +686,7 @@ fn project_form(ctx) {
 }
 fn project_menu(ctx) {
     if !ctx.get_state("projects_open") { return row([]); }
-    let nodes = [small(if ctx.get_state("projects_loading") {"Refreshing project summaries…"} else {"Recent projects · incoming/outgoing commits reflect the last Fetch"}).with_style(style().padding_x(px(10)))];
+    let nodes = [small(if ctx.get_state("summaries_error")!="" {ctx.get_state("summaries_error")} else if ctx.get_state("projects_loading") || ctx.get_state("summaries_pending") {"Refreshing project summaries…"} else {"Recent projects · refreshed automatically · remote counts reflect the last Fetch"}).with_style(style().padding_x(px(10)))];
     let s = ctx.get_state("snapshot");
     for p in project_list(ctx) {
         let active = s != () && s.root == p.root;
@@ -633,6 +712,7 @@ fn acp_config_page(ctx) {
         ]).with_key(`acp-agent-${agent.name}`).with_style(style().padding(px(8)).gap(px(8)).items_center().background(theme_color("surface_raised"))));
     }
     column([
+        watch_timer::WatchTimer(#{key:"watch-timer",sequence:ctx.get_state("watch_tick_id"),on_tick:Fn("watch_tick")}),
         row([button(ctx,"← Back",Fn("acp_page_close"),(),true),text("ACP configuration").with_style(style().font_size(px(18)).font_weight(700))]).with_style(style().gap(px(12)).items_center()),
         small("配置用于生成提交信息的 ACP 代理。"),
         if agents.len()==0 && ctx.get_state("projects_loading") {small("Loading saved ACP agents…")} else {small("Configured agents")},
@@ -645,14 +725,155 @@ fn acp_config_page(ctx) {
         small("命令支持参数及引号，例如 opencode acp 或 \"/path with spaces/agent\" acp。配置自动保存。")
     ]).with_style(style().flex_grow().overflow_y_scroll().padding(px(28)).gap(px(12)).background(theme_color("surface")))
 }
+fn history_request(ctx,op,extra) {
+    if ctx.get_state("busy") || ctx.get_state("selecting") {return;}
+    let s=ctx.get_state("snapshot");if s==() {return;}
+    watch_invalidate(ctx);
+    let data=#{op:op,root:s.root};for key in extra.keys() {data[key]=extra[key];}
+    ctx.set_state("busy",true);status(ctx,"Loading Git history…");
+    ctx.start_task("alloy.git","execute",data,Fn("history_loaded"),Fn("history_failed"));
+}
+fn history_failed(ctx,error) {ctx.set_state("busy",false);status(ctx,`${error}`);}
+fn history_commits(ctx) {let value=ctx.get_state("history_commits");if value==() {[]} else {value}}
+fn history_toggle(ctx,payload) {
+    if !guard(ctx) || ctx.get_state("snapshot")==() {return;}
+    watch_invalidate(ctx);ctx.set_state("log_mode",!ctx.get_state("log_mode"));
+    if ctx.get_state("log_mode") {history_request(ctx,"history",#{skip:0});}
+}
+fn history_more(ctx,payload) {history_request(ctx,"history",#{skip:history_commits(ctx).len()});}
+fn history_select(ctx,id) {
+    if ctx.get_state("busy") {return;}
+    ctx.set_state("history_selected",id);ctx.set_state("history_details",());ctx.set_state("history_doc",());ctx.set_state("history_file","");
+    history_request(ctx,"history_commit",#{commit_id:id});
+}
+fn history_loaded(ctx,result) {
+    ctx.set_state("busy",false);
+    if !result.ok {status(ctx,result.message);return;}
+    let s=ctx.get_state("snapshot");if s==() || !ctx.get_state("log_mode") || result.history_root!=s.root {return;}
+    if result.history_op=="history" {
+        let commits=if result.history_skip==0 {[]} else {history_commits(ctx)};
+        for commit in result.history.commits {commits.push(commit);}
+        ctx.set_state("history_commits",commits);ctx.set_state("history_more",result.history.has_more);
+        status(ctx,`${commits.len()} local commits loaded`);
+        if result.history_skip==0 {
+            ctx.set_state("history_details",());ctx.set_state("history_doc",());ctx.set_state("history_file","");ctx.set_state("history_selected","");
+            if commits.len()>0 {history_select(ctx,commits[0].id);}
+        }
+    } else if result.history_id==ctx.get_state("history_selected") {
+        if result.history_op=="history_commit" {ctx.set_state("history_details",result.details);status(ctx,`Commit ${result.details.commit.id.sub_string(0,8)} · ${result.details.files.len()} changed files`);}
+        else {ctx.set_state("history_doc",prepare_images(ctx,result.document));status(ctx,`Historical diff: ${result.document.path}`);}
+    }
+}
+fn history_file_select(ctx,path) {if !ctx.get_state("busy") {ctx.set_state("history_file",path);}}
+fn history_file_pointer(path,ctx,event) {
+    if event.button!="left" {return;}
+    history_file_select(ctx,path);
+    if event.click_count>=2 {history_show_diff(ctx,path);}
+}
+fn history_show_diff(ctx,path) {
+    if path=="" || ctx.get_state("history_details")==() {return;}
+    history_request(ctx,"history_diff",#{commit_id:ctx.get_state("history_selected"),path:path});
+}
+fn history_diff_selected(ctx,payload) {history_show_diff(ctx,ctx.get_state("history_file"));}
+fn history_close_diff(ctx,payload) {if !ctx.get_state("busy") {ctx.set_state("history_doc",());}}
+fn history_panel(ctx,s) {
+    let rows=[];
+    for commit in history_commits(ctx) {
+        let commit_color=if ctx.get_state("history_selected")==commit.id {theme_color("selection")} else {theme_color("surface")};
+        let commit_style=style().padding_x(px(10)).padding_y(px(5)).gap(px(2)).flex_shrink(false).background(commit_color).hover(style().background(theme_color("surface_hover")));
+        let commit_row=column([
+            text(commit.subject).with_style(style().font_weight(500).max_height(px(38)).overflow_hidden()),
+            small(`${commit.id.sub_string(0,8)}  ·  ${commit.author}  ·  ${commit.date}`)
+        ]).with_key(`history-${commit.id}`).accessibility_label(`Commit ${commit.id}: ${commit.subject}`).tab_index(0).on_click_value(Fn("history_select"),commit.id).on_key_value("enter",Fn("history_select"),commit.id).disabled(ctx.get_state("busy"));
+        rows.push(commit_row.with_style(commit_style));
+    }
+    if rows.len()==0 {rows.push(small(if ctx.get_state("busy") {"Loading commits…"} else {"No local commits yet"}));}
+    let list=[row([text(`Log · ${s.branch}`).with_style(style().font_weight(600)),button(ctx,"Local Changes",Fn("history_toggle"),(),true)]).with_style(style().padding(px(6)).gap(px(8)).items_center().justify_between()),column(rows).with_key("history-list").with_style(style().flex_grow().min_height(px(0)).overflow_y_scroll())];
+    if ctx.get_state("history_more") {list.push(button(ctx,"Load more commits",Fn("history_more"),(),true));}
+    let details=ctx.get_state("history_details");let info=[];
+    if details==() {info.push(small("Select a commit to view its message and changed files."));}
+    else {
+        info.push(small(`${details.commit.id} · ${details.commit.author}`));
+        info.push(small(details.commit.date));
+        info.push(textarea::Textarea(#{key:`history-message-${details.commit.id}`,label:"Commit message",value:details.message,read_only:true,min_rows:2,max_rows:5}));
+        info.push(row([small(`${details.files.len()} changed files`),button(ctx,"Show Diff",Fn("history_diff_selected"),(),ctx.get_state("history_file")!="")]).with_style(style().gap(px(8)).items_center().justify_between()));
+        if details.commit.parents.len()>1 {info.push(small("Merge commit · compared with first parent"));}
+        let files=[];
+        for file in details.files {
+            let color=if file.status=="A" {theme_color("success")} else if file.status=="D" {theme_color("danger")} else {theme_color("accent")};
+            let name=if file.old_path=="" {file.path} else {`${file.old_path} → ${file.path}`};
+            let file_style=style().height(px(26)).min_height(px(26)).flex_shrink(false).gap(px(6)).padding_x(px(6)).items_center();
+            file_style=file_style.background(if ctx.get_state("history_file")==file.path {theme_color("selection")} else {theme_color("surface")}).hover(style().background(theme_color("surface_hover")));
+            let file_row=row([text(file.status).with_style(style().width(px(16)).text_color(color)),text(name).with_style(style().min_width(px(0)).text_ellipsis().overflow_hidden())]);
+            file_row=file_row.with_key(`history-file-${file.path}`).accessibility_label(`Show historical diff for ${file.path}`).tab_index(0).on("pointer_up",Fn("history_file_pointer").curry(file.path)).on_key_value("enter",Fn("history_show_diff"),file.path).disabled(ctx.get_state("busy"));
+            files.push(file_row.with_style(file_style));
+        }
+        info.push(column(files).with_key("history-files").with_style(style().flex_grow().min_height(px(0)).overflow_y_scroll()));
+    }
+    row([
+        column(list).with_style(style().flex_grow().min_width(px(0)).min_height(px(0)).border_right(px(1)).border_color(theme_color("border"))),
+        column(info).with_key("history-details").with_style(style().width(relative(0.45)).min_width(px(0)).min_height(px(0)).padding(px(8)).gap(px(4)))
+    ]).with_key("history-panel").with_style(if ctx.get_state("history_doc")==() {style().flex_grow().min_height(px(0))} else {style().height(px(320)).min_height(px(220)).flex_shrink(false).border_top(px(1)).border_color(theme_color("border"))})
+}
+fn history_diff_view(ctx) {
+    let d=ctx.get_state("history_doc");if d==() {return row([]);}
+    let details=ctx.get_state("history_details");
+    let left_label=if details.commit.parents.len()==0 {"Empty tree"} else {details.commit.parents[0].sub_string(0,8)};
+    let right_label=details.commit.id.sub_string(0,8);
+    let old_path="";for file in details.files {if file.path==d.path {old_path=file.old_path;}}
+    let nodes=[row([text(`Diff · ${file_name(d.path)}`).with_style(style().flex_grow().min_width(px(0)).text_ellipsis().overflow_hidden()),select::Select(#{key:"history-diff-mode",label:"Diff layout",options:[#{value:"split",label:"Side-by-side viewer"},#{value:"unified",label:"Unified viewer"}],value:ctx.get_state("mode"),open:ctx.get_state("mode_open"),query:"",empty_text:"No diff layouts",size:"xs",width:px(176),on_change:Fn("set_mode"),on_open_change:Fn("mode_open")}),button(ctx,"Close Diff",Fn("history_close_diff"),(),true)]).with_style(style().height(px(34)).flex_shrink(false).padding_x(px(8)).gap(px(8)).items_center().background(theme_color("surface_raised"))),diff_path_bar(ctx,d.path,old_path,"history-diff-path")];
+    if d.images!=() {nodes.push(row([image_pane(ctx,`history-left-${right_label}-${d.path}`,d.images.left,left_label,false),image_pane(ctx,`history-right-${right_label}-${d.path}`,d.images.right,right_label,false)]).with_style(style().flex_grow().min_height(px(0)).min_width(px(0))));}
+    else if d.note!="" {nodes.push(text(d.note).with_style(style().padding(px(12))));}
+    else {nodes.push(diff::DiffViewer(#{key:`history-diff-${right_label}-${d.path}`,left:#{source:d.left,label:left_label,file_name:d.path},right:#{source:d.right,label:right_label,file_name:d.path},mode:ctx.get_state("mode"),context_lines:3,whitespace:"exact",show_hunk_controls:false}).with_style(style().flex_grow().min_height(px(0)).min_width(px(0))));}
+    column(nodes).with_key("history-diff").with_style(style().flex_grow().min_height(px(0)).min_width(px(0)))
+}
+fn history_view(ctx,s) {column([history_diff_view(ctx),history_panel(ctx,s)]).with_key("history-view").with_style(style().flex_grow().min_height(px(0)).min_width(px(0)))}
+
+fn status_metric(key,symbol,count,label,color) {
+    let description=`${label}: ${count}`;
+    tooltip::Tooltip(#{key:key,label:description,trigger:text(`${symbol}${count}`).accessibility_label(description).with_style(style().font_family("Menlo").whitespace_nowrap().text_color(if count>0 {color} else {theme_color("text_muted")})),content:text(description),placement:"top"}).with_style(style().flex_shrink(false))
+}
+fn repository_status(ctx, s) {
+    if s == () { return row([]); }
+    let added=0;let modified=0;let deleted=0;let staged=0;let conflicts=0;
+    for file in s.files {
+        if (file.index=="?" || file.index=="A") && file.work!="D" {added+=1;}
+        if file.index=="D" || file.work=="D" {deleted+=1;}
+        if file.index!="?" && file.index!="A" && file.index!="D" && file.work!="D" {modified+=1;}
+        if file.index!=" " && file.index!="?" && !file.conflict {staged+=1;}
+        if file.conflict {conflicts+=1;}
+    }
+    let metrics=[
+        status_metric("repository-changes","Δ",s.files.len(),"未提交文件",theme_color("text_primary")),
+        status_metric("repository-added","+",added,"新增文件",theme_color("success")),
+        status_metric("repository-modified","~",modified,"修改文件",theme_color("accent")),
+        status_metric("repository-deleted","−",deleted,"删除文件",theme_color("danger")),
+        status_metric("repository-staged","✓",staged,"已暂存文件",theme_color("text_primary"))
+    ];
+    if conflicts>0 {metrics.push(status_metric("repository-conflicts","!",conflicts,"冲突文件",theme_color("danger")));}
+    metrics.push(small("│"));
+    if s.upstream=="" {
+        metrics.push(tooltip::Tooltip(#{key:"repository-sync-unconfigured",label:"未设置上游分支",trigger:text("⇅ —").accessibility_label("未设置上游分支").with_style(style().font_family("Menlo").text_color(theme_color("text_muted"))),content:text("未设置上游分支"),placement:"top"}));
+    } else {
+        metrics.push(status_metric("repository-push","↑",s.ahead,`待推送提交 · ${s.upstream} · 最近 Fetch 的远程状态`,theme_color("accent")));
+        metrics.push(status_metric("repository-pull","↓",s.behind,`待拉取提交 · ${s.upstream} · 最近 Fetch 的远程状态`,theme_color("accent")));
+    }
+    row(metrics).with_key("repository-status").accessibility_label("当前项目变更和同步状态").with_style(style().font_size(px(11)).line_height(px(16)).flex_shrink(false).items_center().whitespace_nowrap().gap(px(10)))
+}
+fn status_bar(ctx,s) {
+    row([
+        text(if ctx.get_state("selecting") {`Loading ${ctx.get_state("pending_path")}…`} else {ctx.get_state("message")}).with_key("status").with_style(style().font_size(px(11)).flex_grow().min_width(px(0)).max_height(px(60)).overflow_y_scroll().text_color(theme_color("text_muted"))),
+        repository_status(ctx,s)
+    ]).with_key("status-bar").with_style(style().padding_x(px(10)).padding_y(px(4)).min_height(px(24)).flex_shrink(false).gap(px(12)).items_center().justify_between().background(theme_color("surface_raised")))
+}
 fn view(ctx) {
     if ctx.get_state("acp_page_open") {return acp_config_page(ctx);}
     let s = ctx.get_state("snapshot");
     let header = row([
         text("Alloy").with_style(style().font_size(px(14)).font_weight(700)),
-        small(if s == () {"A home for your changes"} else {`${s.branch}  ·  ↑${s.ahead} ↓${s.behind}  ${s.upstream}`}),
+        small(if s == () {"A home for your changes"} else {`${s.branch}  ·  ${s.upstream}`}),
         row([
-            button(ctx,shortcut_label(ctx,"Refresh","alloy.refresh"),Fn("refresh"),(),s != ()),button(ctx,shortcut_label(ctx,"Fetch","alloy.fetch"),Fn("fetch"),(),s != ()),button(ctx,shortcut_label(ctx,"Pull","alloy.pull_prompt"),Fn("pull_prompt"),(),s != ()),button(ctx,shortcut_label(ctx,"Push","alloy.push_prompt"),Fn("push_prompt"),(),s != ()),button(ctx,shortcut_label(ctx,"Tag…","alloy.tag"),Fn("tag_prompt"),(),s != ())
+            button(ctx,"Log",Fn("history_toggle"),(),s != ()).with_style(style().background(if ctx.get_state("log_mode") {theme_color("selection")} else {theme_color("surface_raised")})),button(ctx,shortcut_label(ctx,"Refresh","alloy.refresh"),Fn("refresh"),(),s != ()),button(ctx,shortcut_label(ctx,"Fetch","alloy.fetch"),Fn("fetch"),(),s != ()),button(ctx,shortcut_label(ctx,"Pull","alloy.pull_prompt"),Fn("pull_prompt"),(),s != ()),button(ctx,shortcut_label(ctx,"Push","alloy.push_prompt"),Fn("push_prompt"),(),s != ()),button(ctx,shortcut_label(ctx,"Tag…","alloy.tag"),Fn("tag_prompt"),(),s != ())
         ]).with_style(style().gap(px(8)))
     ]).with_style(style().padding_x(px(10)).padding_y(px(4)).gap(px(16)).items_center().justify_between());
     let pathbar = row([
@@ -669,8 +890,8 @@ fn view(ctx) {
             button(ctx,"Clone repository",Fn("clone_repo"),(),true),
             small("Full-context diffs  /  Editable results  /  Three-way conflict resolution")
         ]).with_style(style().flex_grow().justify_center().padding(px(90)).gap(px(20)))
-    } else { row(if ctx.get_state("sidebar_visible") {[sidebar(ctx,s),content(ctx)]} else {[content(ctx)]}).with_style(style().flex_grow().min_height(px(0)).min_width(px(0))) };
+    } else if ctx.get_state("log_mode") {history_view(ctx,s)} else { row(if ctx.get_state("sidebar_visible") {[sidebar(ctx,s),content(ctx)]} else {[content(ctx)]}).with_style(style().flex_grow().min_height(px(0)).min_width(px(0))) };
     column([watch_timer::WatchTimer(#{key:"watch-timer",sequence:ctx.get_state("watch_tick_id"),on_tick:Fn("watch_tick")}),header,pathbar,project_form(ctx),palette_view(ctx),confirmation(ctx),body,
-        text(if ctx.get_state("selecting") {`Loading ${ctx.get_state("pending_path")}…`} else {ctx.get_state("message")}).with_key("status").with_style(style().font_size(px(11)).padding_x(px(10)).padding_y(px(3)).min_height(px(24)).max_height(px(60)).overflow_y_scroll().background(theme_color("surface_raised")).text_color(theme_color("text_muted")))
+        status_bar(ctx,s)
     ]).with_style(style().font_size(px(13)).line_height(px(18)).width(relative(1)).height(relative(1)).min_width(px(0)).min_height(px(0)).background(theme_color("surface")).text_color(theme_color("text_primary")))
 }

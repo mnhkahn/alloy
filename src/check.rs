@@ -41,7 +41,12 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
     runtime.windows.register_open("main").map_err(error)?;
     crate::bridge::GitExtension {
         initial: String::new(),
-        fixture,
+        // UI checks must never bootstrap the user's last real repository.
+        fixture: Some(fixture.unwrap_or_else(|| {
+            serde_json::json!({
+                "ok":true,"message":"UI check","snapshot":null,"document":null
+            })
+        })),
         gate: Arc::new(Mutex::new(())),
     }
     .configure_runtime(&mut runtime)?;
@@ -121,6 +126,69 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
                 }
             }
         }
+        if doc["conflict"] == UiValue::Bool(true) && doc["note"] == UiValue::String(String::new()) {
+            let mut merge_snapshot = if let UiValue::Map(fields) = get("snapshot") {
+                fields
+            } else {
+                unreachable!()
+            };
+            merge_snapshot.insert("merging".into(), UiValue::Bool(true));
+            let update = UiValue::Map(BTreeMap::from([
+                ("ok".into(), UiValue::Bool(true)),
+                (
+                    "message".into(),
+                    UiValue::String("Merge in progress".into()),
+                ),
+                ("snapshot".into(), UiValue::Map(merge_snapshot)),
+                ("document".into(), UiValue::Map(doc.clone())),
+                (
+                    "merge_message".into(),
+                    UiValue::String("Merge incoming branch".into()),
+                ),
+            ]));
+            let commit_change = engine.callback(&compiled, "commit_change").map_err(error)?;
+            let loaded = engine.callback(&compiled, "loaded").map_err(error)?;
+            let _ = life
+                .invoke_callback_transactional(
+                    &engine,
+                    &commit_change,
+                    UiValue::String("Earlier generated message".into()),
+                )
+                .map_err(error)?;
+            let _ = life
+                .invoke_callback_transactional(&engine, &loaded, update.clone())
+                .map_err(error)?;
+            assert_eq!(
+                get("commit"),
+                UiValue::String("Merge incoming branch".into())
+            );
+            let _ = life
+                .invoke_callback_transactional(
+                    &engine,
+                    &commit_change,
+                    UiValue::String("Reviewed merge message".into()),
+                )
+                .map_err(error)?;
+            let _ = life
+                .invoke_callback_transactional(&engine, &loaded, update)
+                .map_err(error)?;
+            assert_eq!(
+                get("commit"),
+                UiValue::String("Reviewed merge message".into())
+            );
+            life.render(&mut engine).map_err(error)?;
+            for key in [
+                "three-way-merge",
+                "merge-local-pane",
+                "merge-result-pane",
+                "merge-incoming-pane",
+            ] {
+                assert!(
+                    find_node(life.root().unwrap(), key).is_some(),
+                    "Missing merge pane: {key}"
+                );
+            }
+        }
         let snapshot = get("snapshot");
         let path = doc["path"].clone();
         for (name, payload) in [
@@ -139,14 +207,17 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
                 .map_err(error)?;
             life.render(&mut engine).map_err(error)?;
         }
-        let call =
-            |life: &mut ScriptLifecycle, name: &str, payload: UiValue| -> Result<(), String> {
-                let callback = engine.callback(&compiled, name).map_err(error)?;
-                let _ = life
-                    .invoke_callback_transactional(&engine, &callback, payload)
-                    .map_err(error)?;
-                Ok(())
-            };
+        let call = |engine: &RuntimeEngine,
+                    life: &mut ScriptLifecycle,
+                    name: &str,
+                    payload: UiValue|
+         -> Result<(), String> {
+            let callback = engine.callback(&compiled, name).map_err(error)?;
+            let _ = life
+                .invoke_callback_transactional(&engine, &callback, payload)
+                .map_err(error)?;
+            Ok(())
+        };
         // A refresh completed for an older UI context must not be applied or acknowledged.
         let root = if let UiValue::Map(fields) = &snapshot {
             fields["root"].clone()
@@ -162,14 +233,25 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
             ]))
         };
         let seen = get("watch_seen");
-        call(&mut life, "watch_loaded", response(UiValue::Integer(-1)))?;
+        call(
+            &engine,
+            &mut life,
+            "watch_loaded",
+            response(UiValue::Integer(-1)),
+        )?;
         assert_eq!(get("watch_seen"), seen);
         call(
+            &engine,
             &mut life,
             "draft_change",
             UiValue::String("unsaved auto-refresh draft".into()),
         )?;
-        call(&mut life, "watch_loaded", response(get("watch_epoch")))?;
+        call(
+            &engine,
+            &mut life,
+            "watch_loaded",
+            response(get("watch_epoch")),
+        )?;
         assert_eq!(
             get("draft"),
             UiValue::String("unsaved auto-refresh draft".into())
@@ -179,9 +261,62 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
             seen,
             "deferred changes must remain pending"
         );
-        call(&mut life, "draft_change", doc["right"].clone())?;
+        // Other project summaries refresh even while a draft blocks the worktree watcher.
+        let before_doc = get("doc");
+        let before_message = get("message");
+        let before_agent = get("selected_acp");
+        let before_busy = get("busy");
+        call(
+            &engine,
+            &mut life,
+            "refresh_project_summaries",
+            UiValue::Null,
+        )?;
+        assert_eq!(get("summaries_pending"), UiValue::Bool(true));
+        assert_eq!(get("busy"), before_busy);
+        let summary = UiValue::Map(BTreeMap::from([
+            (
+                "root".into(),
+                UiValue::String("/alloy-test/unopened".into()),
+            ),
+            ("name".into(), UiValue::String("Unopened".into())),
+            ("branch".into(), UiValue::String("main".into())),
+            ("upstream".into(), UiValue::String("origin/main".into())),
+            ("error".into(), UiValue::String(String::new())),
+            ("files".into(), UiValue::Integer(3)),
+            ("added".into(), UiValue::Integer(1)),
+            ("modified".into(), UiValue::Integer(2)),
+            ("deleted".into(), UiValue::Integer(0)),
+            ("staged".into(), UiValue::Integer(0)),
+            ("conflicts".into(), UiValue::Integer(0)),
+            ("ahead".into(), UiValue::Integer(1)),
+            ("behind".into(), UiValue::Integer(2)),
+        ]));
+        call(
+            &engine,
+            &mut life,
+            "project_summaries_loaded",
+            UiValue::Map(BTreeMap::from([(
+                "projects".into(),
+                UiValue::Array(vec![summary.clone()]),
+            )])),
+        )?;
+        assert_eq!(get("summaries_pending"), UiValue::Bool(false));
+        assert_eq!(get("doc"), before_doc);
+        assert_eq!(
+            get("draft"),
+            UiValue::String("unsaved auto-refresh draft".into())
+        );
+        assert_eq!(get("message"), before_message);
+        assert_eq!(get("selected_acp"), before_agent);
+        if let UiValue::Array(projects) = get("projects") {
+            assert!(projects.contains(&summary));
+        } else {
+            unreachable!()
+        }
+        call(&engine, &mut life, "draft_change", doc["right"].clone())?;
         let before = get("included");
-        call(&mut life, "toggle_include", path.clone())?;
+        call(&engine, &mut life, "toggle_include", path.clone())?;
         assert_eq!(
             get("doc"),
             UiValue::Map(doc.clone()),
@@ -198,32 +333,37 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
             "checkbox waits for actual Git status"
         );
         call(
+            &engine,
             &mut life,
             "failed",
             UiValue::String("simulated completion".into()),
         )?;
         call(
+            &engine,
             &mut life,
             "toggle_group",
             UiValue::Array(vec![path.clone()]),
         )?;
         assert_eq!(get("busy"), UiValue::Bool(true));
         call(
+            &engine,
             &mut life,
             "failed",
             UiValue::String("simulated completion".into()),
         )?;
         call(
+            &engine,
             &mut life,
             "collapse_group",
             UiValue::String("Changes".into()),
         )?;
         call(
+            &engine,
             &mut life,
             "collapse_group",
             UiValue::String("Changes".into()),
         )?;
-        call(&mut life, "select", path.clone())?;
+        call(&engine, &mut life, "select", path.clone())?;
         assert_eq!(
             get("selection_id"),
             UiValue::Integer(0),
@@ -234,8 +374,8 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
         } else {
             "staged"
         };
-        call(&mut life, "set_tab", UiValue::String(tab.into()))?;
-        call(&mut life, "select", path)?;
+        call(&engine, &mut life, "set_tab", UiValue::String(tab.into()))?;
+        call(&engine, &mut life, "select", path)?;
         assert_eq!(get("busy"), UiValue::Bool(false));
         assert_eq!(get("selecting"), UiValue::Bool(true));
         assert_eq!(get("snapshot"), snapshot);
@@ -248,21 +388,23 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
                 ("document".into(), UiValue::Map(doc.clone())),
             ]))
         };
-        call(&mut life, "selected", reply(1))?;
+        call(&engine, &mut life, "selected", reply(1))?;
         assert_eq!(
             get("selecting"),
             UiValue::Bool(true),
             "stale response must be ignored"
         );
-        call(&mut life, "selected", reply(2))?;
+        call(&engine, &mut life, "selected", reply(2))?;
         assert_eq!(get("selecting"), UiValue::Bool(false));
         assert_eq!(get("snapshot"), snapshot);
         call(
+            &engine,
             &mut life,
             "draft_change",
             UiValue::String("unsaved tab draft".into()),
         )?;
         call(
+            &engine,
             &mut life,
             "project_choose",
             UiValue::String("/another/project".into()),
@@ -273,26 +415,28 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
             "project switch must protect unsaved drafts"
         );
         assert_eq!(get("busy"), UiValue::Bool(false));
-        call(&mut life, "close_tab", doc["path"].clone())?;
+        call(&engine, &mut life, "close_tab", doc["path"].clone())?;
         assert_eq!(
             get("doc"),
             UiValue::Map(doc.clone()),
             "closing must preserve unsaved drafts"
         );
-        call(&mut life, "closing", UiValue::Null)?;
+        call(&engine, &mut life, "closing", UiValue::Null)?;
         assert_eq!(get("confirm"), UiValue::String("close".into()));
         assert_eq!(get("draft"), UiValue::String("unsaved tab draft".into()));
-        call(&mut life, "cancel", UiValue::Null)?;
-        call(&mut life, "discard_now", UiValue::Null)?;
-        call(&mut life, "close_tab", doc["path"].clone())?;
+        call(&engine, &mut life, "cancel", UiValue::Null)?;
+        call(&engine, &mut life, "discard_now", UiValue::Null)?;
+        call(&engine, &mut life, "close_tab", doc["path"].clone())?;
         assert_eq!(get("doc"), UiValue::Null);
         assert_eq!(get("open_tabs"), UiValue::Array(vec![]));
         call(
+            &engine,
             &mut life,
             "commit_change",
             UiValue::String("first project message".into()),
         )?;
         call(
+            &engine,
             &mut life,
             "filter_change",
             UiValue::String("first filter".into()),
@@ -314,22 +458,125 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
                 ("document".into(), UiValue::Null),
             ]))
         };
-        call(&mut life, "loaded", switch_result(UiValue::Map(other)))?;
+        call(
+            &engine,
+            &mut life,
+            "loaded",
+            switch_result(UiValue::Map(other)),
+        )?;
         assert_eq!(get("commit"), UiValue::String(String::new()));
         assert_eq!(get("filter"), UiValue::String(String::new()));
         assert!(matches!(get("included"), UiValue::Map(_)));
         call(
+            &engine,
             &mut life,
             "commit_change",
             UiValue::String("second project message".into()),
         )?;
-        call(&mut life, "loaded", switch_result(snapshot))?;
+        call(&engine, &mut life, "loaded", switch_result(snapshot))?;
         assert_eq!(
             get("commit"),
             UiValue::String("first project message".into())
         );
         assert_eq!(get("filter"), UiValue::String("first filter".into()));
 
+        // History uses a separate document and only opens a diff on double-click.
+        call(&engine, &mut life, "loaded", reply(2))?;
+        let work_doc = get("doc");
+        let work_draft = get("draft");
+        call(&engine, &mut life, "history_toggle", UiValue::Null)?;
+        assert_eq!(get("log_mode"), UiValue::Bool(true));
+        let id = UiValue::String("a".repeat(40));
+        let commit = UiValue::Map(BTreeMap::from([
+            ("id".into(), id.clone()),
+            ("parents".into(), UiValue::Array(vec![])),
+            ("author".into(), UiValue::String("Test author".into())),
+            (
+                "date".into(),
+                UiValue::String("2026-10-14T10:00:00+08:00".into()),
+            ),
+            ("subject".into(), UiValue::String("History subject".into())),
+        ]));
+        let response = |op: &str| {
+            BTreeMap::from([
+                ("ok".into(), UiValue::Bool(true)),
+                ("history_op".into(), UiValue::String(op.into())),
+                ("history_root".into(), root.clone()),
+                ("history_id".into(), id.clone()),
+            ])
+        };
+        let mut page = response("history");
+        page.insert("history_skip".into(), UiValue::Integer(0));
+        page.insert(
+            "history".into(),
+            UiValue::Map(BTreeMap::from([
+                ("commits".into(), UiValue::Array(vec![commit.clone()])),
+                ("has_more".into(), UiValue::Bool(true)),
+            ])),
+        );
+        call(&engine, &mut life, "history_loaded", UiValue::Map(page))?;
+        assert_eq!(get("history_selected"), id);
+        let mut details = response("history_commit");
+        details.insert(
+            "details".into(),
+            UiValue::Map(BTreeMap::from([
+                ("commit".into(), commit),
+                (
+                    "message".into(),
+                    UiValue::String("History subject\n\nComplete body".into()),
+                ),
+                (
+                    "files".into(),
+                    UiValue::Array(vec![UiValue::Map(BTreeMap::from([
+                        ("path".into(), doc["path"].clone()),
+                        ("old_path".into(), UiValue::String(String::new())),
+                        ("status".into(), UiValue::String("A".into())),
+                    ]))]),
+                ),
+            ])),
+        );
+        call(&engine, &mut life, "history_loaded", UiValue::Map(details))?;
+        life.render(&mut engine).map_err(error)?;
+        let file_key = if let UiValue::String(path) = &doc["path"] {
+            format!("history-file-{path}")
+        } else {
+            unreachable!()
+        };
+        let pointer = find_node(life.root().unwrap(), &file_key)
+            .unwrap()
+            .handler("pointer_up")
+            .and_then(UiEventHandler::as_script)
+            .unwrap()
+            .clone();
+        let click = |count| {
+            UiValue::Map(BTreeMap::from([
+                ("button".into(), UiValue::String("left".into())),
+                ("click_count".into(), UiValue::Integer(count)),
+            ]))
+        };
+        let _ = life
+            .invoke_callback_transactional(&engine, &pointer, click(1))
+            .map_err(error)?;
+        assert_eq!(get("busy"), UiValue::Bool(false));
+        assert_eq!(get("history_doc"), UiValue::Null);
+        let _ = life
+            .invoke_callback_transactional(&engine, &pointer, click(2))
+            .map_err(error)?;
+        assert_eq!(get("busy"), UiValue::Bool(true));
+        let mut diff = response("history_diff");
+        let mut historical = doc.clone();
+        historical.insert("editable".into(), UiValue::Bool(false));
+        historical.insert("conflict".into(), UiValue::Bool(false));
+        diff.insert("document".into(), UiValue::Map(historical));
+        call(&engine, &mut life, "history_loaded", UiValue::Map(diff))?;
+        life.render(&mut engine).map_err(error)?;
+        assert!(find_node(life.root().unwrap(), "history-diff").is_some());
+        assert_eq!(get("doc"), work_doc);
+        assert_eq!(get("draft"), work_draft);
+        call(&engine, &mut life, "history_toggle", UiValue::Null)?;
+        assert_eq!(get("log_mode"), UiValue::Bool(false));
+        assert_eq!(get("doc"), work_doc);
+        assert_eq!(get("draft"), work_draft);
         life.render(&mut engine).map_err(error)?;
     }
     // Completion must retain the full generated message in the read-only box,
@@ -369,4 +616,16 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
 }
 fn error(e: impl std::fmt::Display) -> String {
     e.to_string()
+}
+
+fn find_node<'a>(node: &'a UiNode, key: &str) -> Option<&'a UiNode> {
+    if node.key().is_some_and(|k| k.as_str() == key) {
+        return Some(node);
+    }
+    match node.kind() {
+        UiNodeKind::Box { children } | UiNodeKind::Fragment { children } => {
+            children.iter().find_map(|n| find_node(n, key))
+        }
+        _ => None,
+    }
 }

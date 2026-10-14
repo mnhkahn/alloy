@@ -529,6 +529,92 @@ impl Repository {
             Ok(())
         })
     }
+    /// Paths present in the latest commit; staged additions are deliberately excluded.
+    pub fn committed_paths(&self) -> Result<std::collections::BTreeSet<String>> {
+        if self.cmd(&["rev-parse", "--verify", "HEAD"]).is_err() {
+            return Ok(Default::default());
+        }
+        self.bytes(&["ls-tree", "-r", "--name-only", "-z", "HEAD"])?
+            .split(|b| *b == 0)
+            .filter(|path| !path.is_empty())
+            .map(|path| String::from_utf8(path.to_vec()).map_err(err))
+            .collect()
+    }
+    pub fn stage_committed_changes(&self) -> Result<()> {
+        let snapshot = self.snapshot()?;
+        if snapshot.merging || snapshot.files.iter().any(|f| f.conflict) {
+            return Ok(());
+        }
+        let committed = self.committed_paths()?;
+        let paths: Vec<_> = snapshot
+            .files
+            .iter()
+            .filter(|f| committed.contains(&f.path) || committed.contains(&f.old_path))
+            .map(|f| f.path.clone())
+            .collect();
+        if !paths.is_empty() {
+            self.stage_paths(&paths, true)?;
+        }
+        Ok(())
+    }
+    /// Restore committed files only. New files, including staged additions, survive.
+    pub fn rollback(&self, path: Option<&str>) -> Result<()> {
+        let snapshot = self.snapshot()?;
+        if snapshot.merging || snapshot.files.iter().any(|f| f.conflict) {
+            return Err("Finish the merge before rolling back changes.".into());
+        }
+        let committed = self.committed_paths()?;
+        let files: Vec<_> = snapshot
+            .files
+            .iter()
+            .filter(|f| path.is_none_or(|path| f.path == path))
+            .filter(|f| committed.contains(&f.path) || committed.contains(&f.old_path))
+            .collect();
+        if path.is_some() && files.is_empty() {
+            return Err("Rollback is available only for files in the latest commit.".into());
+        }
+        let mut restore = std::collections::BTreeSet::new();
+        let mut renamed = Vec::new();
+        for file in files {
+            if committed.contains(&file.path) {
+                restore.insert(file.path.as_str());
+            }
+            if committed.contains(&file.old_path) {
+                restore.insert(file.old_path.as_str());
+                if !committed.contains(&file.path) {
+                    // Validate before any writes; never recursively remove a directory.
+                    let full = self.safe_path(&file.path)?;
+                    if fs::symlink_metadata(&full).is_ok_and(|m| m.is_dir()) {
+                        return Err("Cannot roll back a renamed directory or submodule.".into());
+                    }
+                    renamed.push((file.path.as_str(), full));
+                }
+            }
+        }
+        if restore.is_empty() {
+            return Ok(());
+        }
+        self.edit_index(|index| {
+            let mut args = vec!["restore", "--source=HEAD", "--staged", "--worktree", "--"];
+            args.extend(restore.iter().copied());
+            run_index(&self.root, &args, None, Some(index), 120)?;
+            for (name, full) in &renamed {
+                run_index(
+                    &self.root,
+                    &["update-index", "--force-remove", "--", name],
+                    None,
+                    Some(index),
+                    120,
+                )?;
+                match fs::remove_file(full) {
+                    Ok(()) => (),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                    Err(e) => return Err(err(e)),
+                }
+            }
+            Ok(())
+        })
+    }
     pub fn stage(&self, path: &str) -> Result<()> {
         self.stage_paths(&[path.into()], true)
     }
@@ -588,6 +674,24 @@ impl Repository {
             return Err("File changed on disk; refresh before deleting.".into());
         }
         self.cmd(&["rm", "-f", "--", path])?;
+        Ok(())
+    }
+    pub fn merge_message(&self) -> Result<String> {
+        let path = self.cmd(&["rev-parse", "--git-path", "MERGE_MSG"])?;
+        let content = fs::read_to_string(self.root.join(path.trim())).map_err(err)?;
+        Ok(content
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string())
+    }
+    pub fn abort_merge(&self) -> Result<()> {
+        if !self.snapshot()?.merging {
+            return Err("No merge is in progress.".into());
+        }
+        self.cmd(&["merge", "--abort"])?;
         Ok(())
     }
     pub fn commit(&self, message: &str) -> Result<String> {

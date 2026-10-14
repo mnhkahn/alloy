@@ -38,6 +38,10 @@ fn prepare(
     );
     for &(id, source) in gpui_rhai_registry::BUNDLED_COMPONENT_SOURCES_BY_ID {
         if [
+            "components/tooltip",
+            "components/context_menu",
+            "components/menu",
+            "components/divider",
             "components/input",
             "components/select",
             "components/combobox",

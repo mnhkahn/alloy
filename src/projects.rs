@@ -206,6 +206,33 @@ impl Projects {
 mod tests {
     use super::*;
     #[test]
+    fn summaries_read_changes_in_unopened_repositories_without_staging() {
+        let dir = tempfile::tempdir().unwrap();
+        let active = dir.path().join("active");
+        let unopened = dir.path().join("unopened");
+        fs::create_dir_all(&active).unwrap();
+        fs::create_dir_all(&unopened).unwrap();
+        for root in [&active, &unopened] {
+            crate::git::run(root, &["init", "-b", "main"], None).unwrap();
+        }
+        let projects = Projects {
+            roots: vec![
+                active.to_string_lossy().into(),
+                unopened.to_string_lossy().into(),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(projects.overview()[1].files, 0);
+        fs::write(unopened.join("new.txt"), "external edit").unwrap();
+        let summaries = projects.overview();
+        assert_eq!(summaries[0].files, 0);
+        assert_eq!(summaries[1].files, 1);
+        assert_eq!(summaries[1].added, 1);
+        assert_eq!(summaries[1].staged, 0);
+        fs::remove_file(unopened.join("new.txt")).unwrap();
+        assert_eq!(projects.overview()[1].files, 0);
+    }
+    #[test]
     fn persistence_deduplicates_and_keeps_missing_repositories() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings/projects.json");
