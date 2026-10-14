@@ -260,7 +260,7 @@ fn acp_new_command_change(ctx,value) {ctx.set_state("acp_new_command",value);}
 fn acp_add_agent(ctx,payload) {
     if ctx.get_state("busy") || ctx.get_state("projects_loading") {return;}
     let name=ctx.get_state("acp_new_name");name.trim();
-    let command=ctx.get_state("acp_new_command");command.trim()
+    let command=ctx.get_state("acp_new_command");command.trim();
     if name=="" || command=="" {acp_status(ctx,"请填写名称和命令字符串。");return;}
     let agents=acp_agent_list(ctx);
     for agent in agents {if agent.name==name {acp_status(ctx,`名称 ${name} 已存在，请使用其他名称。`);return;}}
