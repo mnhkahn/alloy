@@ -580,7 +580,7 @@ fn sidebar(ctx,s) {
         if folded { continue; }
         for f in files {
             let selected = if ctx.get_state("selecting") {ctx.get_state("pending_path") == f.path} else {ctx.get_state("doc") != () && ctx.get_state("doc").path == f.path};
-            let color = if f.conflict {theme_color("danger")} else if f.index == "?" || f.index == "A" {theme_color("success")} else {theme_color("accent")};
+            let color = if f.conflict || f.index == "D" || f.work == "D" {theme_color("danger")} else if f.index == "?" || f.index == "A" {theme_color("success")} else {theme_color("accent")};
             let parts = f.path.split("/"); let name = parts[parts.len()-1];
             let directory = if parts.len() > 1 { f.path.sub_string(0, f.path.len()-name.len()-1) } else {""};
             let status = if f.conflict {"!"} else if f.index == "?" {"?"} else if f.index != " " {f.index} else {f.work};
