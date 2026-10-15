@@ -111,7 +111,7 @@ fn file_chunks(diff: &str) -> Vec<String> {
     chunks
 }
 
-/// Drop code fences, trim trailing spaces and outer blank lines.
+/// Drop code fences and any preamble before a valid Conventional Commits subject.
 pub fn sanitize(text: &str) -> Result<String, String> {
     let lines: Vec<&str> = text
         .lines()
@@ -122,7 +122,48 @@ pub fn sanitize(text: &str) -> Result<String, String> {
     if message.is_empty() {
         return Err("Model produced no commit message.".into());
     }
-    Ok(message)
+    for (offset, ch) in message.char_indices() {
+        if ch.is_ascii_alphabetic()
+            && (offset == 0
+                || !message[..offset]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_'))
+            && is_commit_subject(message[offset..].lines().next().unwrap_or_default())
+        {
+            return Ok(message[offset..].to_string());
+        }
+    }
+    Err("Model output contains no valid Conventional Commits subject (for example, feat(scope): description).".into())
+}
+
+fn is_commit_subject(line: &str) -> bool {
+    let type_end = line
+        .find(|c: char| !c.is_ascii_alphabetic())
+        .unwrap_or(line.len());
+    let kind = &line[..type_end];
+    if ![
+        "feat", "fix", "docs", "style", "refactor", "perf", "test", "chore", "ci", "revert",
+        "build",
+    ]
+    .iter()
+    .any(|allowed| kind.eq_ignore_ascii_case(allowed))
+    {
+        return false;
+    }
+    let mut rest = &line[type_end..];
+    if let Some(scope) = rest.strip_prefix('(') {
+        let Some(end) = scope.find(')') else {
+            return false;
+        };
+        if scope[..end].trim().is_empty() || scope[..end].contains('(') {
+            return false;
+        }
+        rest = &scope[end + 1..];
+    }
+    rest = rest.strip_prefix('!').unwrap_or(rest);
+    rest.strip_prefix(':')
+        .is_some_and(|subject| subject.starts_with(' ') && !subject.trim().is_empty())
 }
 
 /// Generated text is retained independently of the subsequent Git result.
@@ -221,5 +262,54 @@ mod tests {
             "feat(ui): 添加快捷键\n\n- 支持 Cmd+K"
         );
         assert!(sanitize("```\n\n```").is_err());
+    }
+
+    #[test]
+    fn sanitize_removes_preamble_even_on_same_line() {
+        let message = "feat(core-metrics): 增加短链服务核心指标监控\n\n1. 纳入成功率与时延指标\n2. 支持按方法聚合";
+        let notice = "Skill descriptions were shortened to fit the 2% skills context budget. TRAE can still see every skill, but some descriptions are shorter. Disable unused skills or plugins to leave more room for the rest.";
+        assert_eq!(sanitize(&format!("{notice}{message}")).unwrap(), message);
+        assert_eq!(
+            sanitize(&format!("{notice}\n```text\n{message}\n```\n")).unwrap(),
+            message
+        );
+    }
+
+    #[test]
+    fn sanitize_accepts_commit_types_and_breaking_markers() {
+        for kind in [
+            "feat", "fix", "docs", "style", "refactor", "perf", "test", "chore", "ci", "revert",
+            "build", "FEAT", "Fix",
+        ] {
+            for suffix in [
+                ": 更新内容",
+                "(core): 更新内容",
+                "!: 更新内容",
+                "(core)!: 更新内容",
+            ] {
+                let message = format!("{kind}{suffix}\n\n1. 保留正文");
+                assert_eq!(sanitize(&message).unwrap(), message);
+            }
+        }
+    }
+
+    #[test]
+    fn sanitize_rejects_output_without_valid_subject() {
+        for raw in [
+            "Only a skill warning",
+            "feature: 更新内容",
+            "prefixfeat: 更新内容",
+            "feat(): 更新内容",
+            "feat(core: 更新内容",
+            "feat: ",
+            "feat:缺少空格",
+            "feat(core) 更新内容",
+        ] {
+            assert!(sanitize(raw).is_err(), "{raw}");
+        }
+        assert_eq!(
+            sanitize("feat: \nwarning\nfix: 修复问题").unwrap(),
+            "fix: 修复问题"
+        );
     }
 }
