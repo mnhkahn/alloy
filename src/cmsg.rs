@@ -134,7 +134,9 @@ pub fn sanitize(text: &str) -> Result<String, String> {
             return Ok(message[offset..].to_string());
         }
     }
-    Err("Model output contains no valid Conventional Commits subject (for example, feat(scope): description).".into())
+    Err(format!(
+        "Model output contains no valid Conventional Commits subject. Received:\n{text}"
+    ))
 }
 
 fn is_commit_subject(line: &str) -> bool {
@@ -305,7 +307,9 @@ mod tests {
             "feat:缺少空格",
             "feat(core) 更新内容",
         ] {
-            assert!(sanitize(raw).is_err(), "{raw}");
+            let error = sanitize(raw).unwrap_err();
+            assert!(error.contains(raw), "{error}");
+            assert!(!error.contains("for example"), "{error}");
         }
         assert_eq!(
             sanitize("feat: \nwarning\nfix: 修复问题").unwrap(),

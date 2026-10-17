@@ -110,3 +110,48 @@ jobs:
             gh release create "$RELEASE_TAG" --verify-tag --generate-notes --title "Alloy $RELEASE_TAG"
           fi
           gh release upload "$RELEASE_TAG" release-assets/* --clobber
+      - name: Notify Feishu of published release
+        env:
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+        shell: python
+        run: |
+          import json
+          import os
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          webhook = os.environ.get("FEISHU_WEBHOOK_URL")
+          if not webhook:
+              raise SystemExit("Configure the repository FEISHU_WEBHOOK_URL secret before releasing.")
+
+          server = os.environ["GITHUB_SERVER_URL"]
+          repository = os.environ["GITHUB_REPOSITORY"]
+          tag = os.environ["RELEASE_TAG"]
+          release_url = f"{server}/{repository}/releases/tag/{urllib.parse.quote(tag, safe='')}"
+          run_url = f"{server}/{repository}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+          payload = {
+              "msg_type": "text",
+              "content": {
+                  "text": (
+                      f"Alloy 新版本 {tag} 已编译并发布成功\n"
+                      "支持 macOS Apple Silicon（arm64）和 Intel（x86_64）\n"
+                      f"下载地址：{release_url}\n"
+                      f"构建记录：{run_url}"
+                  )
+              },
+          }
+          request = urllib.request.Request(
+              webhook,
+              data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+              headers={"Content-Type": "application/json"},
+              method="POST",
+          )
+          try:
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  result = json.load(response)
+          except (urllib.error.URLError, TimeoutError, ValueError):
+              raise SystemExit("Feishu notification failed: HTTP, network or invalid JSON response.") from None
+          if result.get("code", result.get("StatusCode")) != 0:
+              raise SystemExit("Feishu rejected the release notification; check the bot settings.")
+          print("Feishu release notification sent.")
