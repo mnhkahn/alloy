@@ -286,6 +286,10 @@ fn execute(data: &Value, initial: &str) -> Result<Value, String> {
                 repo.stage_committed_changes()?;
             }
         }
+        "delete_file" => {
+            repo.delete_file(path)?;
+            message = "File deleted from working tree".into();
+        }
         "rollback" => {
             repo.rollback(Some(path))?;
             message = "File rolled back to HEAD".into();

@@ -5,22 +5,25 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Prefix {
+pub enum Prefix<'a> {
     Plain,
     BigV,
     SmallV,
+    Custom(&'a str),
 }
-impl Prefix {
-    fn render(self) -> &'static str {
+impl<'a> Prefix<'a> {
+    fn render(self) -> &'a str {
         match self {
             Prefix::SmallV => "v",
             Prefix::BigV => "V",
             Prefix::Plain => "",
+            Prefix::Custom(prefix) => prefix,
         }
     }
-    /// Same numbers: v beats V beats no prefix.
+    /// Same numbers: custom beats v, then V, then no prefix.
     fn rank(self) -> u8 {
         match self {
+            Prefix::Custom(_) => 3,
             Prefix::SmallV => 2,
             Prefix::BigV => 1,
             Prefix::Plain => 0,
@@ -28,22 +31,35 @@ impl Prefix {
     }
 }
 
-type Version = (Prefix, u64, u64, u64);
+type Version<'a> = (Prefix<'a>, u64, u64, u64);
 
-/// Accepts 1.2.3, v1.2.3, V1.2.3. Rejects prerelease/build suffixes,
-/// leading zeros and anything else.
-fn parse(name: &str) -> Option<Version> {
-    let (prefix, rest) = if let Some(r) = name.strip_prefix('v') {
-        (Prefix::SmallV, r)
-    } else if let Some(r) = name.strip_prefix('V') {
-        (Prefix::BigV, r)
-    } else {
-        (Prefix::Plain, name)
-    };
-    let parts: Vec<&str> = rest.split('.').collect();
+/// Accepts a stable x.y.z version with an optional prefix made of ASCII
+/// letters, digits, hyphens and underscores (for example ease-v0.2.1).
+/// Rejects prerelease/build suffixes and leading zeros in version numbers.
+fn parse(name: &str) -> Option<Version<'_>> {
+    let mut parts: Vec<&str> = name.split('.').collect();
     if parts.len() != 3 {
         return None;
     }
+    let split = parts[0]
+        .bytes()
+        .rposition(|b| !b.is_ascii_digit())
+        .map_or(0, |i| i + 1);
+    let (prefix, major) = parts[0].split_at(split);
+    if prefix.starts_with('-')
+        || !prefix
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return None;
+    }
+    let prefix = match prefix {
+        "" => Prefix::Plain,
+        "v" => Prefix::SmallV,
+        "V" => Prefix::BigV,
+        other => Prefix::Custom(other),
+    };
+    parts[0] = major;
     let mut nums = [0u64; 3];
     for (i, part) in parts.iter().enumerate() {
         if part.is_empty() || part.len() > 9 || !part.bytes().all(|b| b.is_ascii_digit()) {
@@ -59,15 +75,15 @@ fn parse(name: &str) -> Option<Version> {
 
 /// Highest stable version by numeric compare, prefix breaking ties.
 /// Falls back to v0.0.0 when no tag qualifies.
-pub fn highest(tags: &[String]) -> Version {
+pub fn highest(tags: &[String]) -> Version<'_> {
     tags.iter()
         .filter_map(|t| parse(t))
-        .max_by_key(|(p, a, b, c)| (*a, *b, *c, p.rank()))
+        .max_by_key(|(p, a, b, c)| (*a, *b, *c, p.rank(), p.render()))
         .unwrap_or((Prefix::SmallV, 0, 0, 0))
 }
 
 /// s = patch +1, m = minor +1, l = major +1, keeping the base prefix.
-pub fn bump(base: Version, level: &str) -> Result<String, String> {
+pub fn bump(base: Version<'_>, level: &str) -> Result<String, String> {
     let (p, a, b, c) = base;
     let (a, b, c) = match level {
         "s" => (a, b, c + 1),
@@ -78,7 +94,7 @@ pub fn bump(base: Version, level: &str) -> Result<String, String> {
     Ok(format!("{}{a}.{b}.{c}", p.render()))
 }
 
-fn render(version: Version) -> String {
+fn render(version: Version<'_>) -> String {
     format!(
         "{}{}.{}.{}",
         version.0.render(),
@@ -256,14 +272,25 @@ mod tests {
 
     #[test]
     fn parses_strict_versions() {
-        for name in ["1.2.3", "v1.2.3", "V1.2.3", "v0.0.0"] {
+        for name in [
+            "1.2.3",
+            "v1.2.3",
+            "V1.2.3",
+            "v0.0.0",
+            "ease-v0.2.1",
+            "release-1.2.3",
+            "app2_v1.2.3",
+        ] {
             assert!(parse(name).is_some(), "{name} should parse");
         }
         for name in [
             "v1.2.3-beta",
             "v1.2.3+build",
             "v1.02.3",
-            "release-1.2.3",
+            "ease-v01.2.3",
+            "-ease-v1.2.3",
+            "ease v1.2.3",
+            "ease-v1.2.3-beta",
             "v1.2",
             "v1.2.3.4",
             "vx.y.z",
@@ -281,6 +308,20 @@ mod tests {
         assert_eq!(render(highest(&v(&["1.2.3", "V1.2.3"]))), "V1.2.3");
         assert_eq!(render(highest(&v(&["v1.2.3-rc1", "junk"]))), "v0.0.0");
         assert_eq!(render(highest(&[])), "v0.0.0");
+    }
+
+    #[test]
+    fn custom_prefix_is_preserved_and_ties_are_deterministic() {
+        let tags = v(&["ease-v0.2.1", "ease-v0.10.0", "ease-v0.9.9"]);
+        let base = highest(&tags);
+        assert_eq!(render(base), "ease-v0.10.0");
+        assert_eq!(bump(base, "s").unwrap(), "ease-v0.10.1");
+        assert_eq!(bump(base, "m").unwrap(), "ease-v0.11.0");
+        assert_eq!(bump(base, "l").unwrap(), "ease-v1.0.0");
+        let mut tags = v(&["v0.2.1", "ease-v0.2.1", "app-v0.2.1"]);
+        assert_eq!(render(highest(&tags)), "ease-v0.2.1");
+        tags.reverse();
+        assert_eq!(render(highest(&tags)), "ease-v0.2.1");
     }
 
     #[test]

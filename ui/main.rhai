@@ -43,7 +43,7 @@ fn state_schema() { #{ fields: #{
     history_commits: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
     history_details: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
     history_doc: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
-    file_menu: string_field(""), rollback_path: string_field(""),
+    file_menu: string_field(""), rollback_path: string_field(""), delete_path: string_field(""),
     committed_paths: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
     busy: bool_field(false), editor: bool_field(false), base_view: bool_field(false),
     snapshot: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
@@ -345,9 +345,13 @@ fn clone_repo(ctx, payload) { if guard(ctx) { request(ctx, "clone", #{url:ctx.ge
 fn refresh(ctx, payload) { if ctx.get_state("log_mode") {if guard(ctx) {history_request(ctx,"history",#{skip:0});} return;} if guard(ctx) && ctx.get_state("snapshot") != () { request(ctx, "refresh", #{default_selection:true}); } }
 fn file_menu_open(path, ctx, open) { ctx.set_state("file_menu",if open {path} else {""}); }
 fn can_rollback(ctx, path) { let paths=ctx.get_state("committed_paths"); if paths==() {return false;} for file in ctx.get_state("snapshot").files {if file.path==path {return paths.contains(path) || paths.contains(file.old_path);}} false }
-fn rollback_action(path, ctx, action) {
+fn file_action(path, ctx, action) {
     ctx.set_state("file_menu", "");
     if action == "rollback" && guard(ctx) && can_rollback(ctx,path) {ctx.set_state("rollback_path",path);ctx.set_state("confirm","rollback");}
+    if action == "delete-file" && guard(ctx) && !ctx.get_state("snapshot").merging {ctx.set_state("delete_path",path);ctx.set_state("confirm","delete-file");}
+}
+fn delete_file_now(ctx, payload) {
+    if guard(ctx) {request(ctx,"delete_file",#{path:ctx.get_state("delete_path"),staged:false});}
 }
 fn rollback_all(ctx, payload) { if guard(ctx) {ctx.set_state("confirm","rollback-all");} }
 fn rollback_now(ctx, payload) {
@@ -548,8 +552,8 @@ fn confirmation(ctx) {
     if c == "tag" { return tag_bump_bar(ctx); }
     if c == "tag-go" { return tag_go_bar(ctx); }
     if c == "tag-retry" { return tag_retry_bar(ctx); }
-    let label = if c == "abort-merge" {"Abort this Git merge and restore the pre-merge state?"} else if c == "rollback-all" {"Roll back all committed files to HEAD? New files will be kept."} else if c == "rollback" {`Roll back ${ctx.get_state("rollback_path")} to HEAD?`} else if c == "push" {"No upstream is configured. Push this branch and set its upstream on the configured push remote?"} else if c == "pull" {"Pull and merge changes from the configured upstream?"} else if c == "close" {"Close Alloy and discard unsaved work? An in-flight Git operation may still finish."} else if c == "delete" {"Delete this conflicted file and stage the deletion?"} else {"Discard your unsaved draft?"};
-    let handler = if c == "abort-merge" {Fn("abort_merge_now")} else if c == "rollback" || c == "rollback-all" {Fn("rollback_now")} else if c == "push" || c == "pull" {Fn("network_confirm")} else if c == "close" {Fn("close_now")} else if c == "delete" {Fn("delete_now")} else {Fn("discard_now")};
+    let label = if c == "abort-merge" {"Abort this Git merge and restore the pre-merge state?"} else if c == "rollback-all" {"Roll back all committed files to HEAD? New files will be kept."} else if c == "delete-file" {`Delete ${ctx.get_state("delete_path")} from disk?`} else if c == "rollback" {`Roll back ${ctx.get_state("rollback_path")} to HEAD?`} else if c == "push" {"No upstream is configured. Push this branch and set its upstream on the configured push remote?"} else if c == "pull" {"Pull and merge changes from the configured upstream?"} else if c == "close" {"Close Alloy and discard unsaved work? An in-flight Git operation may still finish."} else if c == "delete" {"Delete this conflicted file and stage the deletion?"} else {"Discard your unsaved draft?"};
+    let handler = if c == "abort-merge" {Fn("abort_merge_now")} else if c == "delete-file" {Fn("delete_file_now")} else if c == "rollback" || c == "rollback-all" {Fn("rollback_now")} else if c == "push" || c == "pull" {Fn("network_confirm")} else if c == "close" {Fn("close_now")} else if c == "delete" {Fn("delete_now")} else {Fn("discard_now")};
     row([text(label),button(ctx,"Confirm",handler,(),true),button(ctx,"Cancel",Fn("cancel"),(),true)])
         .with_style(style().padding(px(12)).gap(px(10)).items_center().background(theme_color("selection")))
 }
@@ -593,7 +597,7 @@ fn sidebar(ctx,s) {
             let row_style = style().height(px(26)).min_height(px(26)).flex_shrink(false).padding_left(px(22)).padding_right(px(6)).gap(px(6)).items_center();
             let row_style = row_style.radius(px(3)).background(if selected {theme_color("selection")} else {theme_color("surface_raised")}).hover(style().background(theme_color("surface_hover")));
             let file_row = row([check_box(ctx,`Stage ${f.path}`,f.path in checked && checked[f.path],f.path in partial,Fn("toggle_include"),f.path,!f.conflict && !s.merging),label]).with_key(`file-${f.path}`).with_style(row_style);
-            items.push(context_menu::ContextMenu(#{key:`file-menu-${f.path}`,label:`Actions for ${f.path}`,trigger:file_row,open:ctx.get_state("file_menu")==f.path,active_value:"rollback",items:[#{kind:"item",value:"rollback",label:"Rollback",disabled:!can_rollback(ctx,f.path) || s.merging || ctx.get_state("busy") || ctx.get_state("selecting") || dirty(ctx)}],on_open_change:Fn("file_menu_open").curry(f.path),on_action:Fn("rollback_action").curry(f.path)}));
+            items.push(context_menu::ContextMenu(#{key:`file-menu-${f.path}`,label:`Actions for ${f.path}`,trigger:file_row,open:ctx.get_state("file_menu")==f.path,active_value:"rollback",items:[#{kind:"item",value:"rollback",label:"Rollback",disabled:!can_rollback(ctx,f.path) || s.merging || ctx.get_state("busy") || ctx.get_state("selecting") || dirty(ctx)},#{kind:"item",value:"delete-file",label:"Delete",disabled:f.work == "D" || f.index == "D" && f.work == " " || s.merging || ctx.get_state("busy") || ctx.get_state("selecting") || dirty(ctx)}],on_open_change:Fn("file_menu_open").curry(f.path),on_action:Fn("file_action").curry(f.path)}));
         }
     }
     let can_commit = has_message(ctx) && selected_count(ctx) > 0;

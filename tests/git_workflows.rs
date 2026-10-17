@@ -801,6 +801,34 @@ fn tag_create_and_push_roundtrip() {
     assert_eq!(r.tag_commit("v1.0.0").unwrap(), p.head);
 }
 #[test]
+fn tag_custom_prefix_prepare_create_and_push() {
+    let (_dir, r) = fixture();
+    let bare = TempDir::new().unwrap();
+    git(bare.path(), &["init", "--bare", "-b", "main"]);
+    git(
+        &r.root,
+        &["remote", "add", "origin", bare.path().to_str().unwrap()],
+    );
+    // The base may exist only on the remote.
+    git(&r.root, &["tag", "ease-v0.2.1"]);
+    git(&r.root, &["push", "origin", "refs/tags/ease-v0.2.1"]);
+    git(&r.root, &["tag", "-d", "ease-v0.2.1"]);
+    let p = alloy::tag::prepare(&r).unwrap();
+    assert_eq!(p.base, "ease-v0.2.1");
+    assert_eq!(p.versions["s"], "ease-v0.2.2");
+    assert_eq!(p.versions["m"], "ease-v0.3.0");
+    assert_eq!(p.versions["l"], "ease-v1.0.0");
+    alloy::tag::create(&r, &p.versions["s"], &p.head, true, &p.remote, &p.push_url).unwrap();
+    assert_eq!(r.tag_commit("ease-v0.2.2").unwrap(), p.head);
+    assert!(
+        r.remote_tags(&p.push_url)
+            .unwrap()
+            .contains(&"ease-v0.2.2".into())
+    );
+    assert_eq!(alloy::tag::prepare(&r).unwrap().base, "ease-v0.2.2");
+}
+
+#[test]
 fn tag_prefix_of_highest_version_wins() {
     let (_dir, r) = fixture();
     git(&r.root, &["tag", "1.5.0"]);
@@ -1264,4 +1292,44 @@ fn upstream_detection_uses_configuration_even_without_a_tracking_ref() {
     assert!(!r.has_upstream().unwrap());
     git(&r.root, &["checkout", "--detach"]);
     assert!(r.has_upstream().is_err());
+}
+
+#[test]
+fn delete_file_removes_working_copy_and_preserves_staged_content() {
+    let (_dir, r) = fixture();
+    fs::write(r.root.join("file.txt"), "staged content\n").unwrap();
+    r.stage("file.txt").unwrap();
+    let staged = run(&r.root, &["show", ":file.txt"], None).unwrap();
+    r.delete_file("file.txt").unwrap();
+    assert!(!r.root.join("file.txt").exists());
+    assert_eq!(run(&r.root, &["show", ":file.txt"], None).unwrap(), staged);
+    let snapshot = r.snapshot().unwrap();
+    assert_eq!(snapshot.files[0].work, "D");
+    r.stage("file.txt").unwrap();
+    assert_eq!(r.snapshot().unwrap().files[0].index, "D");
+}
+
+#[test]
+fn delete_file_handles_untracked_binary_and_rejects_unsafe_paths() {
+    let (_dir, r) = fixture();
+    fs::write(r.root.join("new.bin"), [0, 255, 1]).unwrap();
+    r.delete_file("new.bin").unwrap();
+    assert!(!r.root.join("new.bin").exists());
+    assert!(r.snapshot().unwrap().files.is_empty());
+    assert!(r.delete_file("file.txt").is_err());
+    assert!(r.delete_file("../file.txt").is_err());
+    assert!(r.delete_file(".git/config").is_err());
+    fs::create_dir(r.root.join("folder")).unwrap();
+    fs::write(r.root.join("folder/keep.txt"), "keep").unwrap();
+    assert!(r.delete_file("folder").is_err());
+    assert!(r.root.join("folder/keep.txt").exists());
+    #[cfg(unix)]
+    {
+        let outside = TempDir::new().unwrap();
+        let target = outside.path().join("keep.txt");
+        fs::write(&target, "keep").unwrap();
+        std::os::unix::fs::symlink(&target, r.root.join("link")).unwrap();
+        assert!(r.delete_file("link").is_err());
+        assert_eq!(fs::read_to_string(target).unwrap(), "keep");
+    }
 }

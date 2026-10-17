@@ -557,6 +557,23 @@ impl Repository {
         }
         Ok(())
     }
+    /// Delete a changed working-tree file, preserving the index for explicit staging.
+    pub fn delete_file(&self, path: &str) -> Result<()> {
+        let snapshot = self.snapshot()?;
+        if snapshot.merging || snapshot.files.iter().any(|f| f.conflict) {
+            return Err("Finish the merge before deleting files.".into());
+        }
+        if !snapshot.files.iter().any(|f| f.path == path) {
+            return Err("File is no longer in the change list; refresh before deleting.".into());
+        }
+        let full = self.safe_path(path)?;
+        let metadata = fs::symlink_metadata(&full).map_err(err)?;
+        if !metadata.is_file() {
+            return Err("Delete is available only for regular files.".into());
+        }
+        fs::remove_file(full).map_err(err)
+    }
+
     /// Restore committed files only. New files, including staged additions, survive.
     pub fn rollback(&self, path: Option<&str>) -> Result<()> {
         let snapshot = self.snapshot()?;
