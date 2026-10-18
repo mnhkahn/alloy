@@ -128,7 +128,7 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
     let _ = life.invoke_callback_transactional(&engine, &awake_update, UiValue::Map(BTreeMap::from([
         ("enabled".into(), UiValue::Bool(true)),
         ("active".into(), UiValue::Bool(true)),
-        ("agents".into(), UiValue::Array([("codex:a", "Codex", "修复登录"), ("herdr:b", "xiaoli", "xiaoli")].into_iter().map(|(id, name, title)| UiValue::Map(BTreeMap::from([
+        ("agents".into(), UiValue::Array([("codex:a", "Codex", "修复登录"), ("herdr:b", "opencode", "")].into_iter().map(|(id, name, title)| UiValue::Map(BTreeMap::from([
             ("id".into(), UiValue::String(id.into())), ("name".into(), UiValue::String(name.into())), ("title".into(), UiValue::String(title.into())),
             ("project".into(), UiValue::String("/same-project".into())), ("source".into(), UiValue::String("Local".into())),
         ]))).collect())),
@@ -142,8 +142,13 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
     let tree=life.render(&mut engine).map_err(error)?;
     assert!(matches!(node_with_key(tree, "working-agent-count").map(UiNode::kind), Some(UiNodeKind::Text{text}) if text.as_str()=="2"));
     for id in ["codex:a", "herdr:b"] {assert!(node_with_key(tree, &format!("working-agent-{id}")).is_some());}
-    assert_eq!(text_occurrences(tree, "xiaoli"), 1, "a terminal title equal to the agent name must appear only once");
-    assert_eq!(text_occurrences(tree, "修复登录"), 1, "distinct task titles must remain visible");
+    assert_eq!(text_occurrences(tree, "opencode"), 1);
+    assert_eq!(text_occurrences(tree, "OpenCode"), 0, "a missing task title must stay blank instead of repeating the executable name");
+    assert_eq!(text_occurrences(tree, "修复登录"), 1);
+    let list=node_with_key(tree,"awake-agent-list").unwrap();
+    for label in ["Agent","标题","路径"] {assert_eq!(text_occurrences(list,label),2,"each agent must retain all three labeled fields");}
+    assert_eq!(text_occurrences(tree, "Local"), 0, "source labels must not appear in the agent list");
+    assert_eq!(text_occurrences(tree, "/same-project"), 2);
     assert!(matches!(get("awake_detail"), UiValue::String(detail) if detail.contains("Herdr unavailable")));
     life.render(&mut engine).map_err(error)?;
     let _ = life.invoke_callback_transactional(&engine, &toggle, UiValue::Null).map_err(error)?;

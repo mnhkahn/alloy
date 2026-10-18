@@ -110,7 +110,7 @@ impl Codex {
                         }
                     ),
                     name: "Codex".into(),
-                    title: "工作中的 Codex 任务".into(),
+                    title: String::new(),
                     project: rollout.cwd.clone(),
                     source: "Codex".into(),
                 });

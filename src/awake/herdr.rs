@@ -110,19 +110,20 @@ fn working_agents(value: &Value, socket: &Path) -> Result<Vec<Agent>, String> {
             Agent {
                 id,
                 name: field(agent, &["name", "display_agent", "agent"])
-                    .unwrap_or("Herdr Agent")
+                    .unwrap_or_default()
                     .into(),
-                title: field(
-                    agent,
-                    &["title", "terminal_title_stripped", "terminal_title"],
-                )
-                .or_else(|| {
-                    Path::new(project)
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                })
-                .unwrap_or("工作中的任务")
-                .into(),
+                // Terminal titles often contain only the executable name (e.g.
+                // "OpenCode"). They are not task titles; leave absent titles blank.
+                title: field(agent, &["title"])
+                    .filter(|title| {
+                        !["agent", "display_agent", "name"].iter().any(|key| {
+                            agent[*key]
+                                .as_str()
+                                .is_some_and(|name| name.trim().eq_ignore_ascii_case(title.trim()))
+                        })
+                    })
+                    .unwrap_or_default()
+                    .into(),
                 project: project.into(),
                 source: "Herdr".into(),
             }
@@ -135,7 +136,7 @@ mod tests {
     use super::*;
     #[test]
     fn preserves_agent_identity_name_and_task_title() {
-        let value = json!({"result":{"agents":[{"terminal_id":"one","agent_status":"working","name":"Reviewer","agent":"codex","title":"Review login","cwd":"/project","agent_session":{"agent":"codex","kind":"id","value":"thread-a"}},{"terminal_id":"two","agent_status":"working","display_agent":"Claude Code","terminal_title_stripped":"Fix login","cwd":"/project"}]}});
+        let value = json!({"result":{"agents":[{"terminal_id":"one","agent_status":"working","name":"Reviewer","agent":"codex","title":"Review login","cwd":"/project","agent_session":{"agent":"codex","kind":"id","value":"thread-a"}},{"terminal_id":"two","agent_status":"working","display_agent":"Claude Code","title":"Fix login","terminal_title_stripped":"Claude Code","cwd":"/project"}]}});
         let agents = working_agents(&value, Path::new("/session/herdr.sock")).unwrap();
         assert_eq!(agents.len(), 2);
         assert_eq!(agents[0].id, "codex:thread-a");
@@ -144,6 +145,17 @@ mod tests {
         assert_eq!(agents[1].name, "Claude Code");
         assert_eq!(agents[1].title, "Fix login");
         assert_ne!(agents[0].id, agents[1].id);
+    }
+    #[test]
+    fn missing_fields_stay_blank_and_tool_name_is_not_a_task_title() {
+        let value = json!({"result":{"agents":[{"terminal_id":"one","agent_status":"working","agent":"opencode","title":"OpenCode","terminal_title_stripped":"OpenCode","cwd":"/project"},{"terminal_id":"two","agent_status":"working"}]}});
+        let agents = working_agents(&value, Path::new("/session/herdr.sock")).unwrap();
+        assert_eq!(agents[0].name, "opencode");
+        assert!(agents[0].title.is_empty());
+        assert_eq!(agents[0].project, "/project");
+        assert!(agents[1].name.is_empty());
+        assert!(agents[1].title.is_empty());
+        assert!(agents[1].project.is_empty());
     }
     #[test]
     fn only_working_agents_hold_awake() {

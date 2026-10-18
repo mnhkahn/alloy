@@ -593,11 +593,11 @@ fn awake_menu(ctx) {
     ];
     if agents.len()==0 {nodes.push(text("暂无正在工作的 Agent").with_style(style().font_size(px(12)).padding_y(px(12)).text_color(theme_color("text_muted"))));}
     for agent in agents {
-        let rows=[row([text(agent.name).with_style(style().font_size(px(11)).font_weight(600)),text(agent.source).with_style(style().font_size(px(10)).text_color(theme_color("text_muted")))]).with_style(style().gap(px(8)).items_center())];
-        let title=agent.title;title.trim();let name=agent.name;name.trim();
-        if title!="" && title.to_lower()!=name.to_lower() {rows.push(text(title).with_style(style().font_size(px(12)).line_height(px(18))));}
-        rows.push(text(agent.project).with_style(style().font_size(px(10)).line_height(px(14)).text_color(theme_color("text_muted")).text_ellipsis().overflow_hidden()));
-        nodes.push(column(rows).with_key(`working-agent-${agent.id}`).with_style(style().padding_y(px(8)).gap(px(3)).min_width(px(0)).border_top(px(1)).border_color(theme_color("border"))));
+        nodes.push(column([
+            row([text("Agent").with_style(style().font_size(px(10)).width(px(36)).flex_shrink(false).text_color(theme_color("text_muted"))),text(agent.name).with_style(style().font_size(px(12)).font_weight(600).line_height(px(18)))]).with_style(style().min_height(px(18)).gap(px(6)).items_center()),
+            row([text("标题").with_style(style().font_size(px(10)).width(px(36)).flex_shrink(false).text_color(theme_color("text_muted"))),text(agent.title).with_style(style().font_size(px(12)).line_height(px(18)))]).with_style(style().min_height(px(18)).gap(px(6))),
+            row([text("路径").with_style(style().font_size(px(10)).width(px(36)).flex_shrink(false).text_color(theme_color("text_muted"))),text(agent.project).with_style(style().font_size(px(10)).line_height(px(18)).min_width(px(0)).text_color(theme_color("text_muted")).text_ellipsis().overflow_hidden())]).with_style(style().min_height(px(18)).gap(px(6)).items_center())
+        ]).with_key(`working-agent-${agent.id}`).with_style(style().padding_y(px(8)).gap(px(3)).min_width(px(0)).border_top(px(1)).border_color(theme_color("border"))));
     }
     column(nodes).with_key("awake-agent-list").accessibility_role("dialog").accessibility_label("工作中的 Agent 列表")
       .with_style(style().width(px(420)).max_height(px(360)).overflow_y_scroll().padding_x(px(12)).padding_y(px(10)).gap(px(8)).radius(px(5)).border(px(1)).border_color(theme_color("border")).background(theme_color("surface_raised")).text_color(theme_color("text_primary")))
