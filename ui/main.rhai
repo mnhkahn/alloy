@@ -14,6 +14,9 @@ fn state_schema() { #{ fields: #{
     watch_epoch: #{schema:#{type:"integer"}, "default":#{type:"integer",value:0}},
     watch_seen: #{schema:#{type:"integer"}, "default":#{type:"integer",value:0}},
     watch_pending: bool_field(false), watch_root: string_field(""),
+    awake_enabled: bool_field(false), awake_active: bool_field(false), awake_detail: string_field("勾选后，在 Codex 或 Herdr 工作时保持系统唤醒；允许锁屏和熄屏。"),
+    awake_open: bool_field(false), awake_error: string_field(""),
+    awake_agents: #{schema:#{type:"ui_value"}, "default":#{type:"null"}},
     root: string_field(""), url: string_field(""), filter: string_field(""), message: string_field("Opening Alloy…"), commit: string_field(""),
     draft: string_field(""), mode: string_field("split"), tab: string_field("work"), confirm: string_field(""),
     hide_unchanged: bool_field(true), mode_open: bool_field(false), whitespace_open: bool_field(false), whitespace: string_field("exact"),
@@ -137,6 +140,7 @@ fn watch_invalidate(ctx) {ctx.set_state("watch_epoch",ctx.get_state("watch_epoch
 fn watch_blocked(ctx) {ctx.get_state("busy") || ctx.get_state("selecting") || dirty(ctx) || ctx.get_state("confirm") != ""}
 fn watch_tick(ctx,payload) {
  ctx.set_state("watch_tick_id",ctx.get_state("watch_tick_id")+1);
+ awake_update(ctx,ctx.call_capability("alloy.awake","status",()));
  sync_update_guard(ctx);
  let update_state=ctx.call_capability("alloy.update","status",());ctx.set_state("updates_available",update_state.available);ctx.set_state("updates_can_check",update_state.can_check);
  if ctx.get_state("watch_tick_id") % 12 == 1 {refresh_project_summaries(ctx,());}
@@ -564,6 +568,56 @@ fn check_box(ctx, label, checked, mixed, handler, payload, enabled) {
         .disabled(!enabled || ctx.get_state("busy")).on_click_value(handler,payload)
 }
 fn file_group(file) { if file.conflict {"Merge Conflicts"} else if file.index == "?" {"Unversioned Files"} else {"Changes"} }
+fn awake_agents(ctx) {let agents=ctx.get_state("awake_agents");if agents==() {[]} else {agents}}
+fn awake_update(ctx,result) {
+    ctx.set_state("awake_enabled",result.enabled);ctx.set_state("awake_active",result.active);
+    ctx.set_state("awake_agents",result.agents);ctx.set_state("awake_error",result.error);
+    let detail=if !result.enabled {"防休眠已关闭；勾选后在 Agent 工作时保持系统唤醒。"} else if result.active {"正在保持系统唤醒，允许锁屏和熄屏。"} else {"防休眠已启用，等待 Agent 开始工作。"};
+    if result.error!="" {detail+=" 检测异常："+result.error;}
+    ctx.set_state("awake_detail",detail);
+}
+fn awake_toggle(ctx,payload) {
+    try {
+        awake_update(ctx,ctx.call_capability("alloy.awake","set_enabled",!ctx.get_state("awake_enabled")));
+        if ctx.get_state("awake_enabled") {ctx.set_state("awake_open",true);}
+    }
+    catch(error) {status(ctx,`保持唤醒：${error}`);}
+}
+fn awake_open_changed(ctx,open) {ctx.set_state("awake_open",open);}
+fn awake_menu(ctx) {
+    if !ctx.get_state("awake_open") {return row([]);}
+    let agents=awake_agents(ctx);
+    let nodes=[
+        row([text("工作中的 Agent").with_style(style().font_size(px(12)).font_weight(600)),text(`${agents.len()}`).with_style(style().font_size(px(11)).text_color(theme_color("text_muted")))]).with_style(style().gap(px(6)).items_center()),
+        text(ctx.get_state("awake_detail")).with_style(style().font_size(px(11)).line_height(px(16)).text_color(theme_color("text_muted")))
+    ];
+    if agents.len()==0 {nodes.push(text("暂无正在工作的 Agent").with_style(style().font_size(px(12)).padding_y(px(12)).text_color(theme_color("text_muted"))));}
+    for agent in agents {
+        let rows=[row([text(agent.name).with_style(style().font_size(px(11)).font_weight(600)),text(agent.source).with_style(style().font_size(px(10)).text_color(theme_color("text_muted")))]).with_style(style().gap(px(8)).items_center())];
+        let title=agent.title;title.trim();let name=agent.name;name.trim();
+        if title!="" && title.to_lower()!=name.to_lower() {rows.push(text(title).with_style(style().font_size(px(12)).line_height(px(18))));}
+        rows.push(text(agent.project).with_style(style().font_size(px(10)).line_height(px(14)).text_color(theme_color("text_muted")).text_ellipsis().overflow_hidden()));
+        nodes.push(column(rows).with_key(`working-agent-${agent.id}`).with_style(style().padding_y(px(8)).gap(px(3)).min_width(px(0)).border_top(px(1)).border_color(theme_color("border"))));
+    }
+    column(nodes).with_key("awake-agent-list").accessibility_role("dialog").accessibility_label("工作中的 Agent 列表")
+      .with_style(style().width(px(420)).max_height(px(360)).overflow_y_scroll().padding_x(px(12)).padding_y(px(10)).gap(px(8)).radius(px(5)).border(px(1)).border_color(theme_color("border")).background(theme_color("surface_raised")).text_color(theme_color("text_primary")))
+}
+fn awake_checkbox(ctx) {
+    let checked=ctx.get_state("awake_enabled");let agents=awake_agents(ctx);
+    let checkbox=text(if checked {"✓"} else {""}).with_key("keep-awake-checkbox")
+      .with_style(style().width(px(14)).height(px(14)).line_height(px(12)).flex_shrink(false).text_center().font_size(px(11)).font_weight(400).radius(px(3)).border(px(1)).border_color(if checked {theme_color("accent")} else {theme_color("text_muted")}).background(if checked {theme_color("accent")} else {theme_color("surface")}).text_color(theme_color("on_accent")))
+      .accessibility_role("checkbox").accessibility_label("Codex / Herdr 工作时保持唤醒").accessibility_checked(checked).tab_index(0)
+      .on_key_value("space",Fn("awake_toggle"),()).on_key_value("enter",Fn("awake_toggle"),()).on_click(Fn("awake_toggle"));
+    let trigger=row([
+        text("保持唤醒").with_style(style().font_size(px(12)).font_weight(400).line_height(px(18))),
+        text(`${agents.len()}`).with_key("working-agent-count").with_style(style().font_size(px(10)).font_weight(500).line_height(px(14)).min_width(px(18)).padding_x(px(4)).text_center().radius(px(8)).background(theme_color("surface")).text_color(if ctx.get_state("awake_active") {theme_color("success")} else {theme_color("text_muted")})),
+        text("▾").with_style(style().font_size(px(10)).font_weight(400).text_color(theme_color("text_muted")))
+    ]).with_style(style().height(px(24)).gap(px(5)).items_center().hover(style().background(theme_color("surface_hover"))))
+      .accessibility_role("button").accessibility_label(`查看 ${agents.len()} 个工作中的 Agent`);
+    row([checkbox,overlay(trigger,awake_menu(ctx),#{id:"awake-agents",kind:"popover",placement:"bottom",open:ctx.get_state("awake_open"),gap:6,modal:false,dismiss_on_escape:true,dismiss_on_outside:true,match_trigger_width:false,initial_focus:"first"}).on_open_change(Fn("awake_open_changed"))])
+      .with_key("keep-awake").with_style(style().height(px(24)).flex_shrink(false).padding_x(px(7)).gap(px(6)).items_center().radius(px(3)).background(theme_color("surface_raised")))
+}
+
 fn sidebar(ctx,s) {
     let items = []; let checked = inclusion(ctx); let partial = partials(ctx); let groups = ctx.get_state("collapsed");
     let filter = ctx.get_state("filter").to_lower();
@@ -901,8 +955,9 @@ fn view(ctx) {
         text("Alloy").with_style(style().font_size(px(14)).font_weight(700)),
         small(if s == () {"A home for your changes"} else {`${s.branch}  ·  ${s.upstream}`}),
         row([
+            awake_checkbox(ctx),
             button(ctx,"Log",Fn("history_toggle"),(),s != ()).with_style(style().background(if ctx.get_state("log_mode") {theme_color("selection")} else {theme_color("surface_raised")})),button(ctx,shortcut_label(ctx,"Refresh","alloy.refresh"),Fn("refresh"),(),s != ()),button(ctx,shortcut_label(ctx,"Fetch","alloy.fetch"),Fn("fetch"),(),s != ()),button(ctx,shortcut_label(ctx,"Pull","alloy.pull_prompt"),Fn("pull_prompt"),(),s != ()),button(ctx,shortcut_label(ctx,"Push","alloy.push_prompt"),Fn("push_prompt"),(),s != ()),button(ctx,shortcut_label(ctx,"Tag…","alloy.tag"),Fn("tag_prompt"),(),s != ()),button(ctx,"Updates…",Fn("check_updates"),(),ctx.get_state("updates_available") && ctx.get_state("updates_can_check") && (s==() || !s.merging))
-        ]).with_style(style().gap(px(8)))
+        ]).with_style(style().gap(px(8)).items_center())
     ]).with_style(style().padding_x(px(10)).padding_y(px(4)).gap(px(16)).items_center().justify_between());
     let pathbar = row([
         overlay(text(if s == () {"Projects ▾"} else {`${file_name(s.root)}  ·  ${s.branch}  ▾`}).with_style(style().min_width(px(280)).padding_x(px(10)).padding_y(px(5)).background(theme_color("surface_raised")).hover(style().background(theme_color("surface_hover")))),project_menu(ctx),#{id:"projects-dropdown",kind:"popover",placement:"bottom",open:ctx.get_state("projects_open"),gap:4,modal:false,dismiss_on_escape:true,dismiss_on_outside:true,match_trigger_width:false,initial_focus:"first"}).on_open_change(Fn("projects_toggle")).disabled(ctx.get_state("busy")),

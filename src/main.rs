@@ -60,6 +60,8 @@ fn prepare(
         .unwrap()
         .with_capability("alloy.update", "*")
         .unwrap()
+        .with_capability("alloy.awake", "*")
+        .unwrap()
         .with_capability("alloy.git", "*")
         .unwrap();
     let mut view = EmbeddedScriptView::new(

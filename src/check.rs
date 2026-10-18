@@ -55,6 +55,8 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
         .map_err(error)?
         .with_capability("alloy.update", "*")
         .map_err(error)?
+        .with_capability("alloy.awake", "*")
+        .map_err(error)?
         .with_capability("alloy.git", "*")
         .map_err(error)?
         .activate(&mut runtime.capabilities)
@@ -109,6 +111,43 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
             .cloned()
             .unwrap()
     };
+    // Keep-awake controls are independent of Git busy state, and status updates
+    // must preserve the user's opt-in while showing active tasks and errors.
+    assert_eq!(get("awake_enabled"), UiValue::Bool(false));
+    let previous_busy = get("busy");
+    runtime.borrow_mut().component_state.set(&state_path, "busy", UiValue::Bool(true)).map_err(error)?;
+    let toggle = engine.callback(&compiled, "awake_toggle").map_err(error)?;
+    for enabled in [true, false] {
+        let _ = life.invoke_callback_transactional(&engine, &toggle, UiValue::Null).map_err(error)?;
+        assert_eq!(get("awake_enabled"), UiValue::Bool(enabled));
+        assert_eq!(get("busy"), UiValue::Bool(true));
+        life.render(&mut engine).map_err(error)?;
+    }
+    runtime.borrow_mut().component_state.set(&state_path, "busy", previous_busy).map_err(error)?;
+    let awake_update = engine.callback(&compiled, "awake_update").map_err(error)?;
+    let _ = life.invoke_callback_transactional(&engine, &awake_update, UiValue::Map(BTreeMap::from([
+        ("enabled".into(), UiValue::Bool(true)),
+        ("active".into(), UiValue::Bool(true)),
+        ("agents".into(), UiValue::Array([("codex:a", "Codex", "修复登录"), ("herdr:b", "xiaoli", "xiaoli")].into_iter().map(|(id, name, title)| UiValue::Map(BTreeMap::from([
+            ("id".into(), UiValue::String(id.into())), ("name".into(), UiValue::String(name.into())), ("title".into(), UiValue::String(title.into())),
+            ("project".into(), UiValue::String("/same-project".into())), ("source".into(), UiValue::String("Local".into())),
+        ]))).collect())),
+        ("error".into(), UiValue::String("Herdr unavailable".into())),
+    ]))).map_err(error)?;
+    assert_eq!(get("awake_active"), UiValue::Bool(true));
+    assert!(matches!(get("awake_agents"), UiValue::Array(agents) if agents.len()==2));
+    let open = engine.callback(&compiled, "awake_open_changed").map_err(error)?;
+    let _ = life.invoke_callback_transactional(&engine, &open, UiValue::Bool(true)).map_err(error)?;
+    assert_eq!(get("awake_enabled"), UiValue::Bool(true), "opening the list must not toggle prevention");
+    let tree=life.render(&mut engine).map_err(error)?;
+    assert!(matches!(node_with_key(tree, "working-agent-count").map(UiNode::kind), Some(UiNodeKind::Text{text}) if text.as_str()=="2"));
+    for id in ["codex:a", "herdr:b"] {assert!(node_with_key(tree, &format!("working-agent-{id}")).is_some());}
+    assert_eq!(text_occurrences(tree, "xiaoli"), 1, "a terminal title equal to the agent name must appear only once");
+    assert_eq!(text_occurrences(tree, "修复登录"), 1, "distinct task titles must remain visible");
+    assert!(matches!(get("awake_detail"), UiValue::String(detail) if detail.contains("Herdr unavailable")));
+    life.render(&mut engine).map_err(error)?;
+    let _ = life.invoke_callback_transactional(&engine, &toggle, UiValue::Null).map_err(error)?;
+    let _ = life.invoke_callback_transactional(&engine, &open, UiValue::Bool(false)).map_err(error)?;
     if let UiValue::Map(doc) = get("doc") {
         if let Some(UiValue::Map(images)) = doc.get("images") {
             for side in ["left", "right"] {
@@ -695,5 +734,25 @@ fn find_node<'a>(node: &'a UiNode, key: &str) -> Option<&'a UiNode> {
             children.iter().find_map(|n| find_node(n, key))
         }
         _ => None,
+    }
+}
+
+fn node_with_key<'a>(node: &'a UiNode, key: &str) -> Option<&'a UiNode> {
+    if node.key().is_some_and(|value| value.as_str()==key) {return Some(node);}
+    match node.kind() {
+        UiNodeKind::Box{children} | UiNodeKind::Fragment{children} => children.iter().find_map(|child| node_with_key(child,key)),
+        UiNodeKind::Overlay{trigger,content,..} => node_with_key(trigger,key).or_else(|| node_with_key(content,key)),
+        UiNodeKind::Layer{content,..} => node_with_key(content,key),
+        _ => None,
+    }
+}
+
+fn text_occurrences(node: &UiNode, value: &str) -> usize {
+    match node.kind() {
+        UiNodeKind::Text{text} => usize::from(text.as_str()==value),
+        UiNodeKind::Box{children} | UiNodeKind::Fragment{children} => children.iter().map(|child| text_occurrences(child,value)).sum(),
+        UiNodeKind::Overlay{trigger,content,..} => text_occurrences(trigger,value)+text_occurrences(content,value),
+        UiNodeKind::Layer{content,..} => text_occurrences(content,value),
+        _ => 0,
     }
 }

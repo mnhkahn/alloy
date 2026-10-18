@@ -23,6 +23,17 @@ impl ScriptViewExtension for GitExtension {
     fn configure_runtime(&self, runtime: &mut UiRuntimeState) -> Result<(), String> {
         runtime.capabilities.register(
             CapabilityDescriptor {
+                id: CapabilityId::parse("alloy.awake").map_err(|e| e.to_string())?,
+                version: semver::Version::new(1, 0, 0),
+                methods: BTreeMap::from([
+                    ("status".into(), CapabilityMethod { input: ValueSchema::Null, output: ValueSchema::UiValue }),
+                    ("set_enabled".into(), CapabilityMethod { input: ValueSchema::UiValue, output: ValueSchema::UiValue }),
+                ]),
+            },
+            AwakeCapabilities(alloy::awake::Monitor::new(self.fixture.is_none())),
+        ).map_err(|e| e.to_string())?;
+        runtime.capabilities.register(
+            CapabilityDescriptor {
                 id: CapabilityId::parse("alloy.update").map_err(|e| e.to_string())?,
                 version: semver::Version::new(1, 0, 0),
                 methods: BTreeMap::from([
@@ -493,6 +504,20 @@ fn from_ui(value: UiValue) -> Value {
 }
 
 struct Boot(Value);
+struct AwakeCapabilities(alloy::awake::Monitor);
+impl CapabilityHandler for AwakeCapabilities {
+    fn call(&mut self, method: &str, input: UiValue) -> Result<UiValue, String> {
+        let status = match method {
+            "status" => self.0.status(),
+            "set_enabled" => match input {
+                UiValue::Bool(enabled) => self.0.set_enabled(enabled),
+                _ => return Err("Expected keep-awake checkbox value".into()),
+            },
+            _ => return Err("Unknown keep-awake method".into()),
+        };
+        Ok(to_ui(serde_json::to_value(status).map_err(|e| e.to_string())?))
+    }
+}
 impl CapabilityHandler for Boot {
     fn call(&mut self, method: &str, _: UiValue) -> Result<UiValue, String> {
         Ok(to_ui(if method == "shortcuts" {

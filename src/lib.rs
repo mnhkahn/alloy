@@ -1,4 +1,5 @@
 pub mod acp;
+pub mod awake;
 pub mod cmsg;
 pub mod git;
 pub mod history;
