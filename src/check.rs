@@ -443,6 +443,37 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
         call(&engine, &mut life, "selected", reply(2))?;
         assert_eq!(get("selecting"), UiValue::Bool(false));
         assert_eq!(get("snapshot"), snapshot);
+        // AI commits keep write actions locked while file reads complete independently.
+        for field in ["busy", "ai_running"] {
+            runtime.borrow_mut().component_state
+                .set(&state_path, field, UiValue::Bool(true)).map_err(error)?;
+        }
+        call(&engine, &mut life, "set_tab", UiValue::String(tab.into()))?;
+        assert_eq!(get("selecting"), UiValue::Bool(true));
+        assert_eq!(get("selection_id"), UiValue::Integer(3));
+        call(&engine, &mut life, "selected", reply(3))?;
+        assert_eq!(get("selecting"), UiValue::Bool(false));
+        assert_eq!(get("busy"), UiValue::Bool(true), "diff reads must not unlock writes");
+        assert_eq!(get("ai_running"), UiValue::Bool(true));
+        call(&engine, &mut life, "stage", UiValue::Null)?;
+        assert_eq!(get("busy"), UiValue::Bool(true));
+        // A completion racing an outstanding diff invalidates that older response.
+        call(&engine, &mut life, "set_tab", UiValue::String(tab.into()))?;
+        let completion = UiValue::Map(BTreeMap::from([
+            ("ok".into(), UiValue::Bool(true)),
+            ("message".into(), UiValue::String("AI commit completed".into())),
+            ("snapshot".into(), snapshot.clone()),
+            ("document".into(), UiValue::Map(doc.clone())),
+        ]));
+        call(&engine, &mut life, "ai_finished", completion)?;
+        assert_eq!(get("busy"), UiValue::Bool(false));
+        assert_eq!(get("ai_running"), UiValue::Bool(false));
+        assert_eq!(get("selecting"), UiValue::Bool(true));
+        call(&engine, &mut life, "selected", reply(4))?;
+        assert_eq!(get("selecting"), UiValue::Bool(true));
+        call(&engine, &mut life, "selected", reply(6))?;
+        assert_eq!(get("selecting"), UiValue::Bool(false));
+        life.render(&mut engine).map_err(error)?;
         call(
             &engine,
             &mut life,

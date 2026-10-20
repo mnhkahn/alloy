@@ -560,6 +560,57 @@ fn partial_commit_hook_failure_preserves_original_index_and_head() {
 }
 
 #[test]
+fn favicon_previews_worktree_index_and_history_as_png() {
+    let (_dir, r) = fixture();
+    let icon = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+        32,
+        32,
+        image::Rgba([40, 80, 120, 128]),
+    ));
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    icon.write_to(&mut bytes, image::ImageFormat::Ico).unwrap();
+    let original = bytes.into_inner();
+    fs::write(r.root.join("favicon.ico"), &original).unwrap();
+    assert!(alloy::preview::supported_path("FAVICON.ICO"));
+    let check = |doc: Document| {
+        assert!(!doc.editable);
+        let preview = doc.images.unwrap().right.unwrap();
+        assert!(preview.error.is_empty(), "{}", preview.error);
+        assert_eq!(preview.format, "ICO");
+        assert_eq!(preview.bytes, original.len());
+        assert_eq!((preview.width, preview.height), (32, 32));
+        let (mime, asset) =
+            alloy::preview::load_asset(preview.asset.strip_prefix("preview/").unwrap()).unwrap();
+        assert_eq!(mime, "image/png");
+        assert_eq!(
+            image::guess_format(&asset).unwrap(),
+            image::ImageFormat::Png
+        );
+        assert_eq!(
+            image::load_from_memory(&asset).unwrap().to_rgba8(),
+            icon.to_rgba8()
+        );
+    };
+    check(r.document("favicon.ico", false).unwrap());
+    r.stage("favicon.ico").unwrap();
+    check(r.document("favicon.ico", true).unwrap());
+    git(&r.root, &["commit", "-m", "favicon"]);
+    let head = String::from_utf8(run(&r.root, &["rev-parse", "HEAD"], None).unwrap()).unwrap();
+    check(alloy::history::diff(&r, head.trim(), "favicon.ico").unwrap());
+    assert_eq!(fs::read(r.root.join("favicon.ico")).unwrap(), original);
+    fs::write(r.root.join("favicon.ico"), b"invalid icon").unwrap();
+    let preview = r
+        .document("favicon.ico", false)
+        .unwrap()
+        .images
+        .unwrap()
+        .right
+        .unwrap();
+    assert!(!preview.error.is_empty());
+    assert!(preview.asset.is_empty());
+}
+
+#[test]
 fn images_bypass_text_limit_and_preserve_version_bytes() {
     let (_dir, r) = fixture();
     let mut bytes = std::io::Cursor::new(Vec::new());

@@ -193,6 +193,21 @@ impl Repository {
         }
         Ok(full)
     }
+    /// Resolve the working-tree file or its containing folder for the system opener.
+    pub fn external_open_path(&self, path: &str, folder: bool) -> Result<PathBuf> {
+        let full = self.safe_path(path)?;
+        let target = if folder {
+            full.parent()
+                .ok_or("File has no containing folder")?
+                .to_path_buf()
+        } else {
+            full
+        };
+        if !target.exists() {
+            return Err(format!("Path does not exist on disk: {}", target.display()));
+        }
+        Ok(target)
+    }
     pub fn snapshot(&self) -> Result<Snapshot> {
         let bytes = self.bytes(&["status", "--porcelain=v1", "-z", "--untracked-files=all"])?;
         let files = parse_status(&bytes)?;

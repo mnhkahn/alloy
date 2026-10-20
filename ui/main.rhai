@@ -29,7 +29,7 @@ fn state_schema() { #{ fields: #{
     selected_acp: string_field("Xiaoli"), acp_new_name: string_field(""), acp_new_command: string_field(""), acp_clear_new_fields: bool_field(false), acp_message: string_field(""),
     projects: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
     project_sessions: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
-    selecting: bool_field(false), pending_path: string_field(""),
+    selecting: bool_field(false), pending_path: string_field(""), pending_staged: bool_field(false),
     selection_id: #{ schema: #{ type: "ui_value" }, "default": #{ type: "integer", value: 0 } },
     sidebar_visible: bool_field(true), palette: string_field(""), palette_query: string_field(""),
     focus_commit_id: #{ schema: #{ type: "ui_value" }, "default": #{ type: "integer", value: 0 } },
@@ -48,7 +48,7 @@ fn state_schema() { #{ fields: #{
     history_doc: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
     file_menu: string_field(""), rollback_path: string_field(""), delete_path: string_field(""),
     committed_paths: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
-    busy: bool_field(false), editor: bool_field(false), base_view: bool_field(false),
+    busy: bool_field(false), ai_running: bool_field(false), editor: bool_field(false), base_view: bool_field(false),
     snapshot: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
     doc: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } }
 } } }
@@ -70,7 +70,7 @@ fn loaded(ctx, result) {
     let prior=ctx.get_state("snapshot");
     let entering_merge=result.snapshot != () && result.snapshot.merging && (prior==() || !prior.merging);
     if "document" in result { result.document = prepare_images(ctx, result.document); }
-    ctx.set_state("busy", false);
+    if !ctx.get_state("ai_running") {ctx.set_state("busy", false);}
     status(ctx, result.message);
     if "tag_retry" in result { ctx.set_state("tag",result.tag_retry); ctx.set_state("confirm","tag-retry"); }
     if "overview" in result { let projects = project_list(ctx); let found = false; for i in 0..projects.len() { if projects[i].root == result.overview.root { projects[i] = result.overview; found = true; } } if !found { projects.push(result.overview); } ctx.set_state("projects",projects); }
@@ -128,7 +128,25 @@ fn request(ctx, op, extra) {
     let data = #{ op: op, root: repo_root, path: if d == () { "" } else { d.path }, staged: ctx.get_state("tab") == "staged" };
     for key in extra.keys() { data[key] = extra[key]; }
     ctx.set_state("busy", true); sync_update_guard(ctx);status(ctx, `${op}…`);
-    ctx.start_task("alloy.git", "execute", data, Fn("loaded"), Fn("failed"));
+    if op == "ai_commit" {
+        ctx.set_state("ai_running",true);
+        ctx.start_task("alloy.git", "execute", data, Fn("ai_finished"), Fn("ai_failed"));
+    } else {ctx.start_task("alloy.git", "execute", data, Fn("loaded"), Fn("failed"));}
+}
+fn navigation_blocked(ctx) {ctx.get_state("busy") && !ctx.get_state("ai_running")}
+fn ai_failed(ctx,error) {ctx.set_state("ai_running",false);failed(ctx,error);}
+fn ai_finished(ctx,result) {
+    let current=ctx.get_state("doc");
+    let path=if ctx.get_state("selecting") {ctx.get_state("pending_path")} else if current!=() {current.path} else {""};
+    let staged=if ctx.get_state("selecting") {ctx.get_state("pending_staged")} else {ctx.get_state("tab")=="staged"};
+    let keep=false;
+    if result.snapshot!=() {for file in result.snapshot.files {if file.path==path {keep=true;}}}
+    ctx.set_state("selection_id",ctx.get_state("selection_id")+1);
+    ctx.set_state("selecting",false);ctx.set_state("pending_path","");
+    ctx.set_state("ai_running",false);
+    if keep {result.document=current;}
+    loaded(ctx,result);
+    if keep {load_selection(ctx,path,staged);}
 }
 fn sync_update_guard(ctx) {let s=ctx.get_state("snapshot");ctx.call_capability("alloy.update","guard",#{blocked:watch_blocked(ctx) || (s!=() && s.merging)});}
 fn check_updates(ctx,payload) {
@@ -351,9 +369,15 @@ fn file_menu_open(path, ctx, open) { ctx.set_state("file_menu",if open {path} el
 fn can_rollback(ctx, path) { let paths=ctx.get_state("committed_paths"); if paths==() {return false;} for file in ctx.get_state("snapshot").files {if file.path==path {return paths.contains(path) || paths.contains(file.old_path);}} false }
 fn file_action(path, ctx, action) {
     ctx.set_state("file_menu", "");
+    if action == "open-file" || action == "open-folder" {
+        ctx.start_task("alloy.git","execute",#{op:if action=="open-file" {"open_file"} else {"open_folder"},root:ctx.get_state("snapshot").root,path:path},Fn("file_opened"),Fn("file_open_failed"));
+        return;
+    }
     if action == "rollback" && guard(ctx) && can_rollback(ctx,path) {ctx.set_state("rollback_path",path);ctx.set_state("confirm","rollback");}
     if action == "delete-file" && guard(ctx) && !ctx.get_state("snapshot").merging {ctx.set_state("delete_path",path);ctx.set_state("confirm","delete-file");}
 }
+fn file_opened(ctx, result) {status(ctx,result.message);}
+fn file_open_failed(ctx, error) {status(ctx,`${error}`);}
 fn delete_file_now(ctx, payload) {
     if guard(ctx) {request(ctx,"delete_file",#{path:ctx.get_state("delete_path"),staged:false});}
 }
@@ -374,14 +398,17 @@ fn selected(ctx, result) {
 }
 fn select_file(ctx, path, staged) {
     watch_invalidate(ctx);
-    if ctx.get_state("busy") { return; }
+    if navigation_blocked(ctx) { return; }
     if dirty(ctx) { status(ctx, "You have an unsaved draft. Save it or discard it before changing context."); return; }
     let d = ctx.get_state("doc");
     if !ctx.get_state("selecting") && d != () && d.path == path && d.staged == staged { return; }
+    load_selection(ctx,path,staged);
+}
+fn load_selection(ctx,path,staged) {
     let old_path = "";
     for file in ctx.get_state("snapshot").files { if file.path == path { old_path = file.old_path; } }
     let id = ctx.get_state("selection_id") + 1;
-    ctx.set_state("selection_id", id); ctx.set_state("pending_path", path); ctx.set_state("selecting", true);sync_update_guard(ctx);
+    ctx.set_state("selection_id", id); ctx.set_state("pending_path", path); ctx.set_state("pending_staged", staged); ctx.set_state("selecting", true);sync_update_guard(ctx);
     ctx.start_task("alloy.git", "execute", #{op:"select", root:ctx.get_state("snapshot").root, path:path, old_path:old_path, staged:staged, selection_id:id}, Fn("selected"), Fn("selection_failed"));
 }
 fn select(ctx, path) { select_file(ctx, path, ctx.get_state("tab") == "staged"); }
@@ -390,8 +417,8 @@ fn opened(ctx) { let tabs = ctx.get_state("open_tabs"); if tabs == () {[]} else 
 fn close_tab(ctx, path) {
     watch_invalidate(ctx);
     let d = ctx.get_state("doc");
-    if ctx.get_state("selecting") || ctx.get_state("busy") { return; }
-    if d != () && d.path == path && !guard(ctx) { return; }
+    if ctx.get_state("selecting") || navigation_blocked(ctx) { return; }
+    if d != () && d.path == path && dirty(ctx) { return; }
     let tabs = []; for item in opened(ctx) { if item != path { tabs.push(item); } }
     ctx.set_state("open_tabs", tabs);
     if d != () && d.path == path {
@@ -495,8 +522,11 @@ fn button(ctx, label, handler, payload, enabled) {
         .hover(style().background(theme_color("surface_hover"))).disabled(style().opacity(0.4))).disabled(!enabled || ctx.get_state("busy"))
         .accessibility_role("button").accessibility_label(label).on_click_value(handler,payload)
 }
+fn navigation_button(ctx,label,handler,payload,enabled) {
+    button(ctx,label,handler,payload,enabled).disabled(!enabled || navigation_blocked(ctx))
+}
 fn tab(ctx, label, value) {
-    button(ctx,label,Fn("set_tab"),value,true).with_style(style().background(if ctx.get_state("tab") == value {theme_color("selection")} else {theme_color("surface_raised")}))
+    navigation_button(ctx,label,Fn("set_tab"),value,true).with_style(style().background(if ctx.get_state("tab") == value {theme_color("selection")} else {theme_color("surface_raised")}))
 }
 fn image_zoom(ctx, payload) { ctx.set_state("image_actual", !ctx.get_state("image_actual")); }
 fn image_pane(ctx, key, preview, label, single) {
@@ -647,11 +677,11 @@ fn sidebar(ctx,s) {
                 text(name).with_style(style().flex_shrink(false).text_color(color)),
                 text(directory).with_style(style().text_color(theme_color("text_muted")).min_width(px(0)).text_ellipsis().overflow_hidden())
             ]).with_style(style().height(relative(1)).flex_grow().min_width(px(0)).gap(px(5)).items_center().whitespace_nowrap().overflow_hidden())
-                .accessibility_label(f.path).on_click_value(Fn("select"),f.path).disabled(ctx.get_state("busy"));
+                .accessibility_label(f.path).on_click_value(Fn("select"),f.path).disabled(navigation_blocked(ctx));
             let row_style = style().height(px(26)).min_height(px(26)).flex_shrink(false).padding_left(px(22)).padding_right(px(6)).gap(px(6)).items_center();
             let row_style = row_style.radius(px(3)).background(if selected {theme_color("selection")} else {theme_color("surface_raised")}).hover(style().background(theme_color("surface_hover")));
             let file_row = row([check_box(ctx,`Stage ${f.path}`,f.path in checked && checked[f.path],f.path in partial,Fn("toggle_include"),f.path,!f.conflict && !s.merging),label]).with_key(`file-${f.path}`).with_style(row_style);
-            items.push(context_menu::ContextMenu(#{key:`file-menu-${f.path}`,label:`Actions for ${f.path}`,trigger:file_row,open:ctx.get_state("file_menu")==f.path,active_value:"rollback",items:[#{kind:"item",value:"rollback",label:"Rollback",disabled:!can_rollback(ctx,f.path) || s.merging || ctx.get_state("busy") || ctx.get_state("selecting") || dirty(ctx)},#{kind:"item",value:"delete-file",label:"Delete",disabled:f.work == "D" || f.index == "D" && f.work == " " || s.merging || ctx.get_state("busy") || ctx.get_state("selecting") || dirty(ctx)}],on_open_change:Fn("file_menu_open").curry(f.path),on_action:Fn("file_action").curry(f.path)}));
+            items.push(context_menu::ContextMenu(#{key:`file-menu-${f.path}`,label:`Actions for ${f.path}`,trigger:file_row,open:ctx.get_state("file_menu")==f.path,active_value:"open-file",items:[#{kind:"item",value:"open-file",label:"Open",disabled:f.work == "D" || f.index == "D" && f.work == " "},#{kind:"item",value:"open-folder",label:"Open Folder"},#{kind:"separator"},#{kind:"item",value:"rollback",label:"Rollback",disabled:!can_rollback(ctx,f.path) || s.merging || ctx.get_state("busy") || ctx.get_state("selecting") || dirty(ctx)},#{kind:"item",value:"delete-file",label:"Delete",disabled:f.work == "D" || f.index == "D" && f.work == " " || s.merging || ctx.get_state("busy") || ctx.get_state("selecting") || dirty(ctx)}],on_open_change:Fn("file_menu_open").curry(f.path),on_action:Fn("file_action").curry(f.path)}));
         }
     }
     let can_commit = has_message(ctx) && selected_count(ctx) > 0;
@@ -703,14 +733,14 @@ fn content(ctx) {
             .with_style(style().flex_grow().items_center().justify_center().gap(px(12)));
     }
     let toolbar = [
-        button(ctx,"←",Fn("previous_file"),(),true), button(ctx,"→",Fn("next_file"),(),true),
+        navigation_button(ctx,"←",Fn("previous_file"),(),true), navigation_button(ctx,"→",Fn("next_file"),(),true),
         button(ctx,if ctx.get_state("editor") {"Hide editor"} else {"Edit"},Fn("edit"),(),d.editable),
         select::Select(#{key:"viewer-mode",label:"Diff layout",options:[#{value:"split",label:"Side-by-side viewer"},#{value:"unified",label:"Unified viewer"}],value:ctx.get_state("mode"),open:ctx.get_state("mode_open"),query:"",empty_text:"No options",size:"xs",width:px(176),on_change:Fn("set_mode"),on_open_change:Fn("mode_open")}),
         select::Select(#{key:"whitespace",label:"Whitespace comparison",options:[#{value:"exact",label:"Do not ignore"},#{value:"ignore_changes",label:"Ignore changes"},#{value:"ignore_all",label:"Ignore all spaces"}],value:ctx.get_state("whitespace"),open:ctx.get_state("whitespace_open"),query:"",empty_text:"No options",size:"xs",width:px(156),on_change:Fn("whitespace_change"),on_open_change:Fn("whitespace_open")})
     ];
-    toolbar.push(button(ctx,if ctx.get_state("hide_unchanged") {"Show all lines"} else {"Hide unchanged"},Fn("toggle_unchanged"),(),true));
-    if d.images != () { toolbar = [button(ctx,"←",Fn("previous_file"),(),true),button(ctx,"→",Fn("next_file"),(),true),small("Image preview"),button(ctx,if ctx.get_state("image_actual") {"Reduced size"} else {"Actual size (100%)"},Fn("image_zoom"),(),true)]; }
-    if d.conflict {toolbar=[button(ctx,"←",Fn("previous_file"),(),true),button(ctx,"→",Fn("next_file"),(),true),small("Merge conflict · edit the center result")];}
+    toolbar.push(navigation_button(ctx,if ctx.get_state("hide_unchanged") {"Show all lines"} else {"Hide unchanged"},Fn("toggle_unchanged"),(),true));
+    if d.images != () { toolbar = [navigation_button(ctx,"←",Fn("previous_file"),(),true),navigation_button(ctx,"→",Fn("next_file"),(),true),small("Image preview"),navigation_button(ctx,if ctx.get_state("image_actual") {"Reduced size"} else {"Actual size (100%)"},Fn("image_zoom"),(),true)]; }
+    if d.conflict {toolbar=[navigation_button(ctx,"←",Fn("previous_file"),(),true),navigation_button(ctx,"→",Fn("next_file"),(),true),small("Merge conflict · edit the center result")];}
     if dirty(ctx) { toolbar.push(button(ctx,"Save",Fn("save"),(),d.editable)); toolbar.push(button(ctx,"Discard",Fn("discard"),(),true)); }
     if ctx.get_state("advanced") && !d.conflict {
         toolbar.push(tab(ctx,"Local","work")); toolbar.push(tab(ctx,"Staged","staged"));

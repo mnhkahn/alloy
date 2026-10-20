@@ -105,8 +105,17 @@ impl AsyncCapabilityHandler for Handler {
         let initial = self.initial.clone();
         let gate = self.gate.clone();
         Ok(TaskWork::new(move || {
+            // File browsing must remain responsive while ACP holds the mutation gate.
+            if string(&data, "op") == "select" {
+                return Ok(to_ui(execute(&data, &initial).unwrap_or_else(|error| {
+                    json!({"ok":false,"message":error,"snapshot":null,"document":null,"selection_id":data["selection_id"]})
+                })));
+            }
             // Read-only summaries must not queue behind ACP or network operations.
-            if matches!(string(&data, "op"), "projects" | "project_summaries") {
+            if matches!(
+                string(&data, "op"),
+                "projects" | "project_summaries" | "open_file" | "open_folder"
+            ) {
                 return execute(&data, &initial).map(to_ui);
             }
             let _guard = gate.lock().map_err(|e| e.to_string())?;
@@ -133,9 +142,6 @@ impl AsyncCapabilityHandler for Handler {
             }
             let output = match execute(&data, &initial) {
                 Ok(value) => value,
-                Err(error) if string(&data, "op") == "select" => {
-                    json!({"ok":false,"message":error,"snapshot":null,"document":null,"selection_id":data["selection_id"]})
-                }
                 Err(error) => {
                     let repo = Repository::open(string(&data, "root")).ok();
                     let snapshot = repo.as_ref().and_then(|r| r.snapshot().ok());
@@ -266,6 +272,21 @@ fn execute(data: &Value, initial: &str) -> Result<Value, String> {
         }
         _ => Repository::open(string(data, "root"))?,
     };
+    if matches!(op, "open_file" | "open_folder") {
+        let target = repo.external_open_path(path, op == "open_folder")?;
+        let output = std::process::Command::new("/usr/bin/open")
+            .arg(&target)
+            .output()
+            .map_err(|e| format!("Cannot open {}: {e}", target.display()))?;
+        if !output.status.success() {
+            return Err(format!(
+                "Cannot open {}: {}",
+                target.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        return Ok(json!({"ok":true,"message":format!("Opened {}", target.display())}));
+    }
     if op == "push_prepare" {
         repo.head_sha()?;
         return Ok(json!({"ok":true,"needs_upstream":!repo.has_upstream()?}));

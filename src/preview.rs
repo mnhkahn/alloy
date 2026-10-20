@@ -42,7 +42,7 @@ pub fn supported_path(path: &str) -> bool {
         .is_some_and(|v| {
             matches!(
                 v.to_ascii_lowercase().as_str(),
-                "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tif" | "tiff"
+                "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tif" | "tiff" | "ico"
             )
         })
 }
@@ -85,6 +85,7 @@ fn prepare_inner(bytes: &[u8]) -> Result<ImagePreview, String> {
         image::ImageFormat::WebP => ("WebP", "image/webp"),
         image::ImageFormat::Bmp => ("BMP", "image/bmp"),
         image::ImageFormat::Tiff => ("TIFF", "image/tiff"),
+        image::ImageFormat::Ico => ("ICO", "image/png"),
         _ => return Err("This image format is not supported for preview.".into()),
     };
     let reader = image::ImageReader::with_format(Cursor::new(bytes), format);
@@ -95,19 +96,29 @@ fn prepare_inner(bytes: &[u8]) -> Result<ImagePreview, String> {
         return Err("Image exceeds the 16 megapixel preview limit.".into());
     }
     // Validate in the Git worker, so a corrupt image never breaks the Rhai render.
-    image::ImageReader::with_format(Cursor::new(bytes), format)
+    let decoded = image::ImageReader::with_format(Cursor::new(bytes), format)
         .decode()
         .map_err(|e| format!("Cannot decode image: {e}"))?;
+    // The UI asset loader does not decode ICO; serve its selected frame as PNG.
+    let mut png = Cursor::new(Vec::new());
+    let asset_bytes = if format == image::ImageFormat::Ico {
+        decoded
+            .write_to(&mut png, image::ImageFormat::Png)
+            .map_err(|e| format!("Cannot convert icon for preview: {e}"))?;
+        png.get_ref().as_slice()
+    } else {
+        bytes
+    };
     let key = format!("{:x}", Sha256::digest(bytes));
     let mut cache = cache().lock().map_err(|e| e.to_string())?;
     if !cache.iter().any(|v| v.key == key) {
-        while cache.iter().map(|v| v.bytes.len()).sum::<usize>() + bytes.len() > CACHE_BYTES {
+        while cache.iter().map(|v| v.bytes.len()).sum::<usize>() + asset_bytes.len() > CACHE_BYTES {
             cache.pop_front();
         }
         cache.push_back(Cached {
             key: key.clone(),
             mime: mime.into(),
-            bytes: bytes.to_vec(),
+            bytes: asset_bytes.to_vec(),
         });
     }
     Ok(ImagePreview {
