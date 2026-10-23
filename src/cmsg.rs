@@ -1,6 +1,6 @@
 //! AI commit messages from the staged diff, mirroring the xiaoli git-cmsg flow:
 //! prepare the staged diff, compact it for the model, generate, sanitize, commit.
-use crate::acp;
+use crate::llm;
 use crate::git::Repository;
 
 const TOTAL_BUDGET: usize = 12 * 1024;
@@ -220,7 +220,7 @@ pub fn generate_and_commit_confirmed(
         prepared.stat.trim(),
         diff
     );
-    let raw = acp::generate(&repo.root, SYSTEM_PROMPT, &user)?;
+    let raw = llm::generate_selected(&repo.root, SYSTEM_PROMPT, &user)?;
     let message = sanitize(&raw)?;
     // Keep the generated text available to the UI even when Git rejects the commit.
     let commit_result = if confirmed_tree.is_some()

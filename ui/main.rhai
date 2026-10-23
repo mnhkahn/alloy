@@ -26,6 +26,9 @@ fn state_schema() { #{ fields: #{
     projects_open: bool_field(false), projects_loading: bool_field(false), add_project: bool_field(false),
     acp_page_open: bool_field(false), acp_select_open: bool_field(false),
     acp_agents: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
+    direct_models: #{schema:#{type:"ui_value"}, "default":#{type:"null"}},
+    selected_model: string_field(""), registration_type: string_field("acp"),
+    model_base_url: string_field(""), model_id: string_field(""), model_api_key: string_field(""),
     selected_acp: string_field("Xiaoli"), acp_new_name: string_field(""), acp_new_command: string_field(""), acp_clear_new_fields: bool_field(false), acp_message: string_field(""),
     projects: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
     project_sessions: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
@@ -295,7 +298,7 @@ fn project_summaries_loaded(ctx,result) {
 fn project_summaries_failed(ctx,error) {ctx.set_state("summaries_pending",false);ctx.set_state("summaries_error",`Project summaries: ${error}`);}
 fn projects_loaded(ctx, result) {
     ctx.set_state("projects_loading",false); ctx.set_state("projects",result.projects);
-    if "acp_agents" in result {ctx.set_state("acp_agents",result.acp_agents);ctx.set_state("selected_acp",result.selected_acp);}
+    if "acp_agents" in result {apply_ai_settings(ctx,result);}
 }
 fn projects_failed(ctx, error) { ctx.set_state("projects_loading",false); if ctx.get_state("acp_page_open") {acp_status(ctx,`无法加载 ACP 配置：${error}`);} else {status(ctx,`Cannot refresh projects: ${error}`);} }
 fn projects_toggle(ctx, value) {
@@ -312,34 +315,52 @@ fn acp_page_open(ctx, payload) {
         ctx.set_state("projects_loading",true); ctx.start_task("alloy.git","execute",#{op:"projects"},Fn("projects_loaded"),Fn("projects_failed"));
     }
 }
-fn acp_page_close(ctx, payload) {ctx.set_state("acp_page_open",false);}
+fn acp_page_close(ctx, payload) {ctx.set_state("model_api_key","");ctx.set_state("acp_page_open",false);}
 fn acp_agent_list(ctx) {let agents=ctx.get_state("acp_agents");if agents==() {[]} else {agents}}
+fn direct_model_list(ctx) {let models=ctx.get_state("direct_models");if models==() {[]} else {models}}
+fn apply_ai_settings(ctx,result) {
+    ctx.set_state("acp_agents",result.acp_agents);ctx.set_state("selected_acp",result.selected_acp);
+    if "direct_models" in result {ctx.set_state("direct_models",result.direct_models);ctx.set_state("selected_model",result.selected_model);}
+}
 fn acp_agent_command(agent) {if "command" in agent && agent.command!="" {agent.command} else {`${agent.path} acp`}}
-fn acp_options(ctx) {let options=[];for agent in acp_agent_list(ctx) {options.push(#{value:`agent:${agent.name}`,label:agent.name});}options.push(#{value:"register",label:"手动注册"});options}
+fn acp_options(ctx) {
+    let options=[];
+    for agent in acp_agent_list(ctx) {options.push(#{value:`agent:${agent.name}`,label:`ACP · ${agent.name}`});}
+    for model in direct_model_list(ctx) {options.push(#{value:`model:${model.name}`,label:`模型 · ${model.name}`});}
+    options.push(#{value:"register",label:"手动注册"});options
+}
 fn acp_agent_selector(ctx) {
-    if acp_agent_list(ctx).len()==0 {return small("Loading ACP…");}
-    select::Select(#{key:"acp-agent-selector",label:"ACP agent",placement:"top",disabled:ctx.get_state("busy"),options:acp_options(ctx),value:`agent:${ctx.get_state("selected_acp")}`,open:ctx.get_state("acp_select_open"),query:"",empty_text:"No ACP agents",size:"xs",width:px(176),on_change:Fn("acp_dropdown_change"),on_open_change:Fn("acp_select_open_changed")})
+    let selected=if ctx.get_state("selected_model")!="" {`model:${ctx.get_state("selected_model")}`} else {`agent:${ctx.get_state("selected_acp")}`};
+    let options=acp_options(ctx);let found=false;for option in options {if option.value==selected {found=true;}}
+    if !found {selected="register";}
+    select::Select(#{key:"acp-agent-selector",label:"AI provider",placement:"top",disabled:ctx.get_state("busy"),options:options,value:selected,open:ctx.get_state("acp_select_open"),query:"",empty_text:"No providers",size:"xs",width:px(176),on_change:Fn("acp_dropdown_change"),on_open_change:Fn("acp_select_open_changed")})
 }
 fn acp_dropdown_change(ctx,value) {
     if value==() {return;}
-    if value=="register" {ctx.set_state("acp_select_open",false);acp_page_open(ctx,());return;}
-    if !value.starts_with("agent:") {return;}
-    acp_select_change(ctx,value.sub_string(6));
+    ctx.set_state("acp_select_open",false);
+    if value=="register" {acp_page_open(ctx,());return;}
+    if value.starts_with("model:") {model_settings_request(ctx,"select_model",#{name:value.sub_string(6)});return;}
+    if value.starts_with("agent:") {acp_select_change(ctx,value.sub_string(6));}
 }
 fn acp_select_open_changed(ctx,value) {ctx.set_state("acp_select_open",value);}
 fn acp_status(ctx,message) {ctx.set_state("acp_message",message);status(ctx,message);}
 fn acp_settings_saved(ctx,result) {
     if !result.ok {acp_settings_failed(ctx,result.message);return;}
-    ctx.set_state("busy",false);ctx.set_state("acp_agents",result.acp_agents);ctx.set_state("selected_acp",result.selected_acp);acp_status(ctx,if ctx.get_state("acp_clear_new_fields") {`已注册 ${result.selected_acp}，并设为当前代理。`} else {"ACP 配置已保存。"});
-    if ctx.get_state("acp_clear_new_fields") {ctx.set_state("acp_new_name","");ctx.set_state("acp_new_command","");ctx.set_state("acp_clear_new_fields",false);}
+    ctx.set_state("busy",false);apply_ai_settings(ctx,result);
+    acp_status(ctx,if ctx.get_state("acp_clear_new_fields") {"已注册并设为当前 AI 提供方。"} else {"AI 配置已保存。"});
+    if ctx.get_state("acp_clear_new_fields") {
+        ctx.set_state("acp_new_name","");ctx.set_state("acp_new_command","");
+        ctx.set_state("model_base_url","");ctx.set_state("model_id","");ctx.set_state("model_api_key","");
+        ctx.set_state("acp_clear_new_fields",false);
+    }
 }
 fn acp_settings_failed(ctx,error) {ctx.set_state("busy",false);ctx.set_state("acp_clear_new_fields",false);acp_status(ctx,`保存失败：${error}`);}
-fn save_acp_settings(ctx,agents,selected) {
+fn save_acp_settings(ctx,agents,selected,activate) {
     if ctx.get_state("busy") {return;}
     ctx.set_state("busy",true);sync_update_guard(ctx);acp_status(ctx,"正在保存 ACP 配置…");
-    ctx.start_task("alloy.git","execute",#{op:"save_acp_settings",acp_agents:agents,selected_acp:selected},Fn("acp_settings_saved"),Fn("acp_settings_failed"));
+    ctx.start_task("alloy.git","execute",#{op:"save_acp_settings",acp_agents:agents,selected_acp:selected,activate_acp:activate},Fn("acp_settings_saved"),Fn("acp_settings_failed"));
 }
-fn acp_select_change(ctx,value) {save_acp_settings(ctx,acp_agent_list(ctx),value);}
+fn acp_select_change(ctx,value) {save_acp_settings(ctx,acp_agent_list(ctx),value,true);}
 fn acp_new_name_change(ctx,value) {ctx.set_state("acp_new_name",value);}
 fn acp_new_command_change(ctx,value) {ctx.set_state("acp_new_command",value);}
 fn acp_add_agent(ctx,payload) {
@@ -350,13 +371,40 @@ fn acp_add_agent(ctx,payload) {
     let agents=acp_agent_list(ctx);
     for agent in agents {if agent.name==name {acp_status(ctx,`名称 ${name} 已存在，请使用其他名称。`);return;}}
     agents.push(#{name:name,path:"",command:command});ctx.set_state("acp_clear_new_fields",true);
-    save_acp_settings(ctx,agents,name);
+    save_acp_settings(ctx,agents,name,true);
+}
+fn registration_type_change(ctx,value) {ctx.set_state("registration_type",value);ctx.set_state("model_api_key","");}
+fn model_base_url_change(ctx,value) {ctx.set_state("model_base_url",value);}
+fn model_id_change(ctx,value) {ctx.set_state("model_id",value);}
+fn model_api_key_change(ctx,value) {ctx.set_state("model_api_key",value);}
+fn model_settings_request(ctx,op,extra) {
+    if ctx.get_state("busy") || ctx.get_state("projects_loading") {return;}
+    let data=#{op:op};for key in extra.keys() {data[key]=extra[key];}
+    ctx.set_state("busy",true);sync_update_guard(ctx);acp_status(ctx,"正在保存模型配置…");
+    ctx.start_task("alloy.git","execute",data,Fn("acp_settings_saved"),Fn("acp_settings_failed"));
+}
+fn model_register(ctx,payload) {
+    if ctx.get_state("busy") || ctx.get_state("projects_loading") {return;}
+    let name=ctx.get_state("acp_new_name");name.trim();
+    let base=ctx.get_state("model_base_url");base.trim();let model=ctx.get_state("model_id");model.trim();
+    if name=="" || base=="" || model=="" {acp_status(ctx,"请填写名称、Base URL 和模型名。");return;}
+    ctx.set_state("acp_clear_new_fields",true);
+    model_settings_request(ctx,"register_model",#{model:#{name:name,base_url:base,model:model,api_key:ctx.get_state("model_api_key"),max_tokens:4096}});
+}
+fn model_choose(ctx,name) {model_settings_request(ctx,"select_model",#{name:name});}
+fn model_remove(ctx,name) {model_settings_request(ctx,"remove_model",#{name:name});}
+fn model_edit(ctx,name) {
+    for model in direct_model_list(ctx) {if model.name==name {
+        ctx.set_state("registration_type","model");ctx.set_state("acp_new_name",name);
+        ctx.set_state("model_base_url",model.base_url);ctx.set_state("model_id",model.model);ctx.set_state("model_api_key","");
+        acp_status(ctx,"编辑后点注册 / 更新。API Key 留空保留已有密钥。");return;
+    }}
 }
 fn acp_remove_agent(ctx,name) {
     let agents=acp_agent_list(ctx);if agents.len()<2 {acp_status(ctx,"至少保留一个 ACP 代理。");return;}
     let remaining=[];for agent in agents {if agent.name!=name {remaining.push(agent);}}
     let selected=ctx.get_state("selected_acp");if selected==name {selected=remaining[0].name;}
-    save_acp_settings(ctx,remaining,selected);
+    save_acp_settings(ctx,remaining,selected,false);
 }
 fn project_choose(ctx, root) {
     if !guard(ctx) { return; }
@@ -599,7 +647,7 @@ fn confirmation(ctx) {
         return column([
             text("AI 提交已拦截：以下文件名命中敏感文件规则").with_style(style().font_weight(700).text_color(theme_color("danger"))),
             text(files).with_style(style().max_height(px(120)).overflow_y_scroll()),
-            text("请人工确认这些文件可以发送给所选 AI 代理并提交到 Git。授权仅对本次暂存内容有效。"),
+            text("请人工确认这些文件可以发送给所选 ACP 代理或直连模型并提交到 Git。授权仅对本次暂存内容有效。"),
             row([button(ctx,"确认并继续 AI 提交",Fn("sensitive_commit_now"),(),true),button(ctx,"取消",Fn("cancel"),(),true)]).with_style(style().gap(px(8)))
         ]).with_style(style().padding(px(12)).gap(px(8)).flex_shrink(false).background(theme_color("surface_raised")).border(px(1)).border_color(theme_color("danger")));
     }
@@ -832,22 +880,39 @@ fn acp_config_page(ctx) {
     for agent in agents {
         rows.push(row([
             column([text(agent.name).with_style(style().font_weight(600)),small(acp_agent_command(agent))]).with_style(style().flex_grow().gap(px(2))),
-            button(ctx,if ctx.get_state("selected_acp")==agent.name {"Selected"} else {"Select"},Fn("acp_select_change"),agent.name,ctx.get_state("selected_acp")!=agent.name && !ctx.get_state("busy")),
+            button(ctx,if ctx.get_state("selected_model")=="" && ctx.get_state("selected_acp")==agent.name {"Selected"} else {"Select"},Fn("acp_select_change"),agent.name,(ctx.get_state("selected_model")!="" || ctx.get_state("selected_acp")!=agent.name) && !ctx.get_state("busy")),
             button(ctx,"Remove",Fn("acp_remove_agent"),agent.name,agents.len()>1 && !ctx.get_state("busy"))
         ]).with_key(`acp-agent-${agent.name}`).with_style(style().padding(px(8)).gap(px(8)).items_center().background(theme_color("surface_raised"))));
     }
+    for model in direct_model_list(ctx) {
+        rows.push(row([
+            column([text(`模型 · ${model.name}`).with_style(style().font_weight(600)),small(`${model.model} · ${model.base_url}`),small(if model.has_api_key {"API Key 已保存"} else {"未设置 API Key"})]).with_style(style().flex_grow().gap(px(2))),
+            button(ctx,if ctx.get_state("selected_model")==model.name {"Selected"} else {"Select"},Fn("model_choose"),model.name,ctx.get_state("selected_model")!=model.name),
+            button(ctx,"编辑",Fn("model_edit"),model.name,true),button(ctx,"Remove",Fn("model_remove"),model.name,true)
+        ]).with_key(`direct-model-${model.name}`).with_style(style().padding(px(8)).gap(px(8)).items_center().background(theme_color("surface_raised"))));
+    }
+    let fields=if ctx.get_state("registration_type")=="model" {[
+        input::Input(#{key:"model-base-url",label:"Base URL",value:ctx.get_state("model_base_url"),placeholder:"https://api.example.com/v1",on_change:Fn("model_base_url_change"),disabled:ctx.get_state("busy")}),
+        input::Input(#{key:"model-id",label:"模型名",value:ctx.get_state("model_id"),placeholder:"服务商提供的模型 ID",on_change:Fn("model_id_change"),disabled:ctx.get_state("busy")}),
+        input::Input(#{key:"model-api-key",label:"API Key（可选）",value:ctx.get_state("model_api_key"),placeholder:"新建可留空；更新时留空保留已有密钥",on_change:Fn("model_api_key_change"),disabled:ctx.get_state("busy")}),
+        small("支持 OpenAI 兼容的 Chat Completions 接口。Base URL 填到 /v1，或填写完整 /chat/completions 地址。")
+    ]} else {[
+        input::Input(#{key:"acp-agent-command",label:"命令字符串",value:ctx.get_state("acp_new_command"),placeholder:"opencode acp",on_change:Fn("acp_new_command_change"),on_submit:Fn("acp_add_agent"),disabled:ctx.get_state("busy")}),
+        small("命令支持参数及引号，例如 opencode acp。")
+    ]};
     column([
         watch_timer::WatchTimer(#{key:"watch-timer",sequence:ctx.get_state("watch_tick_id"),on_tick:Fn("watch_tick")}),
-        row([button(ctx,"← Back",Fn("acp_page_close"),(),true),text("ACP configuration").with_style(style().font_size(px(18)).font_weight(700))]).with_style(style().gap(px(12)).items_center()),
-        small("配置用于生成提交信息的 ACP 代理。"),
-        if agents.len()==0 && ctx.get_state("projects_loading") {small("Loading saved ACP agents…")} else {small("Configured agents")},
+        row([button(ctx,"← Back",Fn("acp_page_close"),(),true),text("AI configuration").with_style(style().font_size(px(18)).font_weight(700))]).with_style(style().gap(px(12)).items_center()),
+        small("选择 ACP 代理或直连模型，用于生成并提交 Commit message。"),
+        if agents.len()==0 && ctx.get_state("projects_loading") {small("Loading saved ACP agents…")} else {small("已注册的 ACP 代理和直连模型")},
         column(rows).with_style(style().gap(px(4))),
         small("手动注册"),
+        row([button(ctx,"ACP 代理",Fn("registration_type_change"),"acp",ctx.get_state("registration_type")!="acp"),button(ctx,"直连模型",Fn("registration_type_change"),"model",ctx.get_state("registration_type")!="model")]).with_style(style().gap(px(8))),
         input::Input(#{key:"acp-agent-name",label:"名称",value:ctx.get_state("acp_new_name"),placeholder:"e.g. Xiaoli work",on_change:Fn("acp_new_name_change"),disabled:ctx.get_state("busy")}),
-        input::Input(#{key:"acp-agent-command",label:"命令字符串",value:ctx.get_state("acp_new_command"),placeholder:"opencode acp",on_change:Fn("acp_new_command_change"),on_submit:Fn("acp_add_agent"),disabled:ctx.get_state("busy")}),
-        row([button(ctx,if ctx.get_state("busy") {"保存中…"} else {"注册"},Fn("acp_add_agent"),(),!ctx.get_state("busy") && !ctx.get_state("projects_loading"))]).with_style(style().gap(px(8))),
+        column(fields).with_style(style().gap(px(12))),
+        row([button(ctx,if ctx.get_state("busy") {"保存中…"} else {"注册 / 更新"},if ctx.get_state("registration_type")=="model" {Fn("model_register")} else {Fn("acp_add_agent")},(),!ctx.get_state("busy") && !ctx.get_state("projects_loading"))]).with_style(style().gap(px(8))),
         text(ctx.get_state("acp_message")).with_key("acp-settings-status").with_style(style().font_size(px(13))),
-        small("命令支持参数及引号，例如 opencode acp 或 \"/path with spaces/agent\" acp。配置自动保存。")
+        small("配置自动保存，无需手动编辑配置文件。")
     ]).with_style(style().flex_grow().overflow_y_scroll().padding(px(28)).gap(px(12)).background(theme_color("surface")))
 }
 fn history_request(ctx,op,extra) {

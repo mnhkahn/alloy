@@ -1,100 +1,81 @@
-//! OpenAI-compatible text generation. Configuration comes from the existing
-//! xiaoli model settings (~/.xiaoli/settings.json + secrets.json); Alloy adds
-//! no model configuration of its own.
-use serde::Deserialize;
-use std::{collections::BTreeMap, path::Path, path::PathBuf, time::Duration};
+//! OpenAI-compatible generation for models registered through Alloy's UI.
+use serde::{Deserialize, Serialize};
+use std::{path::Path, time::Duration};
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 const RETRIES: usize = 2;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
     pub name: String,
     pub base_url: String,
     pub model: String,
+    #[serde(default)]
     pub api_key: Option<String>,
+    #[serde(default = "default_max_tokens")]
     pub max_tokens: u64,
 }
-
-#[derive(Deserialize)]
-struct Settings {
-    models: Option<Models>,
-}
-#[derive(Deserialize)]
-struct Models {
-    default: Option<String>,
-    options: Option<BTreeMap<String, ModelEntry>>,
-}
-#[derive(Deserialize)]
-struct ModelEntry {
-    name: Option<String>,
-    base_url: Option<String>,
-    model: Option<String>,
-    api_key: Option<String>,
-    api_key_env: Option<String>,
-    max_tokens: Option<u64>,
+fn default_max_tokens() -> u64 {
+    4096
 }
 
-fn config_dir() -> Result<PathBuf, String> {
-    let home = std::env::var_os("HOME").ok_or("Cannot locate the home directory.")?;
-    Ok(PathBuf::from(home).join(".xiaoli"))
-}
-
-/// Resolve the default model: settings.json `models.default` → `options[id]`.
-/// API key priority: entry `api_key` → env var named by `api_key_env` →
-/// secrets.json entry of the same name.
-pub fn load() -> Result<ModelConfig, String> {
-    let dir = config_dir()?;
-    let path = dir.join("settings.json");
-    let raw = std::fs::read_to_string(&path)
-        .map_err(|_| format!("No model configuration found at {}.", path.display()))?;
-    let settings: Settings =
-        serde_json::from_str(&raw).map_err(|e| format!("Cannot parse {}: {e}", path.display()))?;
-    let models = settings
-        .models
-        .ok_or("settings.json has no \"models\" section.")?;
-    let default = models
-        .default
-        .filter(|d| !d.is_empty())
-        .ok_or("settings.json has no models.default entry.")?;
-    let entry = models
-        .options
-        .unwrap_or_default()
-        .remove(&default)
-        .ok_or(format!(
-            "Model \"{default}\" is not defined under models.options."
-        ))?;
-    let non_empty = |value: Option<String>| value.filter(|v| !v.trim().is_empty());
-    let base_url =
-        non_empty(entry.base_url).ok_or(format!("Model \"{default}\" has no base_url."))?;
-    let model = non_empty(entry.model).ok_or(format!("Model \"{default}\" has no model name."))?;
-    let env_name = entry.api_key_env.clone().unwrap_or_default();
-    let api_key = non_empty(entry.api_key)
-        .or_else(|| std::env::var(&env_name).ok().filter(|k| !k.is_empty()))
-        .or_else(|| secret(&dir, &env_name));
-    Ok(ModelConfig {
-        name: non_empty(entry.name).unwrap_or(default),
-        base_url,
-        model,
-        api_key,
-        max_tokens: entry.max_tokens.filter(|t| *t > 0).unwrap_or(4096),
-    })
-}
-
-fn secret(dir: &Path, key: &str) -> Option<String> {
-    if key.is_empty() {
-        return None;
+impl ModelConfig {
+    pub fn validate(&mut self) -> Result<(), String> {
+        self.name = self.name.trim().to_owned();
+        self.base_url = self.base_url.trim().trim_end_matches('/').to_owned();
+        self.model = self.model.trim().to_owned();
+        self.api_key = self
+            .api_key
+            .take()
+            .map(|k| k.trim().to_owned())
+            .filter(|k| !k.is_empty());
+        if self.name.is_empty() || self.model.is_empty() {
+            return Err("请填写名称和模型名。".into());
+        }
+        let url = reqwest::Url::parse(&self.base_url).map_err(|_| "请填写有效的 Base URL。")?;
+        if !matches!(url.scheme(), "http" | "https")
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(
+                "Base URL 必须为 HTTP/HTTPS 地址，不能包含用户名、密码、查询参数或片段。".into(),
+            );
+        }
+        if self.max_tokens == 0 {
+            return Err("输出 token 上限必须大于零。".into());
+        }
+        Ok(())
     }
-    let raw = std::fs::read_to_string(dir.join("secrets.json")).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    value
-        .get(key)?
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
 }
 
-fn endpoint(base_url: &str) -> String {
+/// Dispatch through the provider selected beside Commit; never read Xiaoli config.
+pub fn generate_selected(cwd: &Path, system: &str, user: &str) -> Result<String, String> {
+    let settings = crate::projects::Projects::read(&crate::projects::store_path()?)?;
+    generate_using(&settings, cwd, system, user)
+}
+
+fn generate_using(
+    settings: &crate::projects::Projects,
+    cwd: &Path,
+    system: &str,
+    user: &str,
+) -> Result<String, String> {
+    if settings.selected_model.is_empty() {
+        crate::acp::generate(cwd, system, user)
+    } else {
+        let config = settings
+            .direct_models
+            .iter()
+            .find(|m| m.name == settings.selected_model)
+            .ok_or("所选直连模型已不存在，请重新选择。")?;
+        generate(config, system, user)
+    }
+}
+
+pub(crate) fn endpoint(base_url: &str) -> String {
     let trimmed = base_url.trim_end_matches('/');
     if trimmed.ends_with("/chat/completions") {
         trimmed.to_string()
@@ -167,4 +148,107 @@ fn send(request: reqwest::blocking::RequestBuilder) -> Result<String, (bool, Str
         return Err((true, "Model returned an empty response.".into()));
     }
     Ok(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+    };
+
+    #[test]
+    fn direct_selection_sends_registered_endpoint_model_key_and_messages() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}/v1/", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut bytes = Vec::new();
+            let (header_end, content_length) = loop {
+                let mut buf = [0; 1024];
+                let n = stream.read(&mut buf).unwrap();
+                assert!(n > 0);
+                bytes.extend_from_slice(&buf[..n]);
+                if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&bytes[..end]).to_lowercase();
+                    let len: usize = headers
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length: "))
+                        .unwrap()
+                        .parse()
+                        .unwrap();
+                    break (end + 4, len);
+                }
+            };
+            while bytes.len() < header_end + content_length {
+                let mut buf = [0; 4096];
+                let n = stream.read(&mut buf).unwrap();
+                assert!(n > 0);
+                bytes.extend_from_slice(&buf[..n]);
+            }
+            let response = r#"{"choices":[{"message":{"content":"feat: 恢复直连模型"}}]}"#;
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", response.len(), response).unwrap();
+            bytes
+        });
+        let mut settings = crate::projects::Projects::default();
+        settings
+            .register_model(ModelConfig {
+                name: "local mock".into(),
+                base_url: base,
+                model: "test-model".into(),
+                api_key: Some("test-key".into()),
+                max_tokens: 4096,
+            })
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            generate_using(&settings, dir.path(), "system prompt", "staged diff").unwrap(),
+            "feat: 恢复直连模型"
+        );
+        let bytes = server.join().unwrap();
+        let request = String::from_utf8(bytes).unwrap();
+        assert!(request.starts_with("POST /v1/chat/completions HTTP/1.1"));
+        assert!(
+            request
+                .to_lowercase()
+                .contains("authorization: bearer test-key")
+        );
+        let body: serde_json::Value =
+            serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body["model"], "test-model");
+        assert_eq!(body["messages"][0]["content"], "system prompt");
+        assert_eq!(body["messages"][1]["content"], "staged diff");
+        assert_eq!(body["stream"], false);
+    }
+
+    #[test]
+    fn endpoints_and_invalid_registration() {
+        assert_eq!(
+            endpoint("https://example.test/v1/"),
+            "https://example.test/v1/chat/completions"
+        );
+        assert_eq!(
+            endpoint("https://example.test/v1/chat/completions"),
+            "https://example.test/v1/chat/completions"
+        );
+        for url in [
+            "",
+            "ftp://example.test",
+            "https://user:password@example.test",
+            "https://example.test?api_key=secret",
+        ] {
+            let mut model = ModelConfig {
+                name: "test".into(),
+                base_url: url.into(),
+                model: "m".into(),
+                api_key: None,
+                max_tokens: 4096,
+            };
+            assert!(model.validate().is_err());
+        }
+    }
 }

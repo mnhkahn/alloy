@@ -131,6 +131,34 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
             .cloned()
             .unwrap()
     };
+    // The same registration page supports direct models, without returning saved keys.
+    let original_agents = get("acp_agents");
+    let original_acp = get("selected_acp");
+    let original_models = get("direct_models");
+    let original_model = get("selected_model");
+    let saved = crate::bridge::to_ui(serde_json::json!({
+        "ok":true,"acp_agents":[],"selected_acp":"Xiaoli","selected_model":"Local model",
+        "direct_models":[{"name":"Local model","base_url":"http://localhost:8000/v1","model":"test-model","has_api_key":true,"max_tokens":4096}]
+    }));
+    let callback = engine.callback(&compiled, "acp_settings_saved").map_err(error)?;
+    let _ = life.invoke_callback_transactional(&engine, &callback, saved).map_err(error)?;
+    assert_eq!(get("selected_model"), UiValue::String("Local model".into()));
+    runtime.borrow_mut().component_state.set(&state_path, "acp_page_open", UiValue::Bool(true)).map_err(error)?;
+    let edit_model = engine.callback(&compiled, "model_edit").map_err(error)?;
+    let _ = life.invoke_callback_transactional(&engine, &edit_model, UiValue::String("Local model".into())).map_err(error)?;
+    let tree = life.render(&mut engine).map_err(error)?;
+    assert!(find_node(tree,"model-base-url").is_some());
+    assert!(find_node(tree,"model-api-key").is_some());
+    assert_eq!(get("model_id"),UiValue::String("test-model".into()));
+    assert_eq!(get("model_api_key"),UiValue::String(String::new()));
+    let key_change = engine.callback(&compiled, "model_api_key_change").map_err(error)?;
+    let _ = life.invoke_callback_transactional(&engine, &key_change, UiValue::String("unsaved-key".into())).map_err(error)?;
+    let close = engine.callback(&compiled, "acp_page_close").map_err(error)?;
+    let _ = life.invoke_callback_transactional(&engine, &close, UiValue::Null).map_err(error)?;
+    assert_eq!(get("model_api_key"),UiValue::String(String::new()));
+    for (field,value) in [("acp_agents",original_agents),("selected_acp",original_acp),("direct_models",original_models),("selected_model",original_model),("registration_type",UiValue::String("acp".into())),("acp_new_name",UiValue::String(String::new()))] {
+        runtime.borrow_mut().component_state.set(&state_path,field,value).map_err(error)?;
+    }
     // Keep-awake controls are independent of Git busy state, and status updates
     // must preserve the user's opt-in while showing active tasks and errors.
     assert_eq!(get("awake_enabled"), UiValue::Bool(false));
@@ -167,7 +195,8 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
     assert_eq!(text_occurrences(tree, "修复登录"), 1);
     let list=node_with_key(tree,"awake-agent-list").unwrap();
     for label in ["Agent","标题","路径"] {assert_eq!(text_occurrences(list,label),2,"each agent must retain all three labeled fields");}
-    assert_eq!(text_occurrences(tree, "Local"), 0, "source labels must not appear in the agent list");
+    // The diff toolbar may legitimately contain "Local"; inspect only the agent list.
+    assert_eq!(text_occurrences(list, "Local"), 0, "source labels must not appear in the agent list");
     assert_eq!(text_occurrences(tree, "/same-project"), 2);
     assert!(matches!(get("awake_detail"), UiValue::String(detail) if detail.contains("Herdr unavailable")));
     life.render(&mut engine).map_err(error)?;

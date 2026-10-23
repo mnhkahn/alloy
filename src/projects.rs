@@ -24,6 +24,10 @@ pub struct Projects {
     pub acp_agents: Vec<AcpAgent>,
     #[serde(default)]
     pub selected_acp: String,
+    #[serde(default)]
+    pub direct_models: Vec<crate::llm::ModelConfig>,
+    #[serde(default)]
+    pub selected_model: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AcpAgent {
@@ -52,6 +56,8 @@ impl Default for Projects {
                 command: String::new(),
             }],
             selected_acp: "Xiaoli".into(),
+            direct_models: Vec::new(),
+            selected_model: String::new(),
         }
     }
 }
@@ -168,7 +174,43 @@ impl Projects {
             .map(|agent| agent.path.clone())
             .filter(|path| !path.is_empty())
             .unwrap_or_else(default_xiaoli_path);
+        if !settings.selected_model.is_empty()
+            && !settings
+                .direct_models
+                .iter()
+                .any(|m| m.name == settings.selected_model)
+        {
+            settings.selected_model.clear();
+        }
         Ok(settings)
+    }
+    pub fn ai_settings(&self) -> serde_json::Value {
+        let models: Vec<_> = self
+            .direct_models
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "name":m.name,"base_url":m.base_url,"model":m.model,"max_tokens":m.max_tokens,
+                    "has_api_key":m.api_key.as_ref().is_some_and(|k| !k.is_empty())
+                })
+            })
+            .collect();
+        serde_json::json!({"ok":true,"acp_agents":self.acp_agents,"selected_acp":self.selected_acp,
+            "direct_models":models,"selected_model":self.selected_model,"snapshot":null,"document":null})
+    }
+    /// Create or update a profile. A blank key preserves an existing credential.
+    pub fn register_model(&mut self, mut model: crate::llm::ModelConfig) -> Result<(), String> {
+        model.validate()?;
+        if let Some(existing) = self.direct_models.iter_mut().find(|m| m.name == model.name) {
+            if model.api_key.is_none() {
+                model.api_key = existing.api_key.clone();
+            }
+            *existing = model.clone();
+        } else {
+            self.direct_models.push(model.clone());
+        }
+        self.selected_model = model.name;
+        Ok(())
     }
     pub fn remember(&mut self, root: &str) {
         self.roots.retain(|r| r != root);
@@ -205,6 +247,53 @@ impl Projects {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn registered_models_persist_without_exposing_keys_to_ui() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("projects.json");
+        let mut settings = Projects::default();
+        let legacy: Projects =
+            serde_json::from_value(serde_json::json!({"roots":[],"selected_acp":"Xiaoli"}))
+                .unwrap();
+        assert!(legacy.direct_models.is_empty());
+        assert!(legacy.selected_model.is_empty());
+        let model = crate::llm::ModelConfig {
+            name: " Direct ".into(),
+            base_url: " https://example.test/v1/ ".into(),
+            model: " test-model ".into(),
+            api_key: Some("test-key".into()),
+            max_tokens: 4096,
+        };
+        settings.register_model(model.clone()).unwrap();
+        settings.save(&path).unwrap();
+        let mut restored = Projects::read(&path).unwrap();
+        assert_eq!(restored.selected_model, "Direct");
+        assert_eq!(
+            restored.direct_models[0].api_key.as_deref(),
+            Some("test-key")
+        );
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let ui = restored.ai_settings();
+        assert!(!ui.to_string().contains("test-key"));
+        assert_eq!(ui["direct_models"][0]["has_api_key"], true);
+        let mut updated = model;
+        updated.api_key = None;
+        updated.model = "updated".into();
+        restored.register_model(updated).unwrap();
+        assert_eq!(restored.direct_models.len(), 1);
+        assert_eq!(
+            restored.direct_models[0].api_key.as_deref(),
+            Some("test-key")
+        );
+        assert_eq!(restored.direct_models[0].model, "updated");
+        restored.selected_model.clear();
+        restored.save(&path).unwrap();
+        assert!(Projects::read(&path).unwrap().selected_model.is_empty());
+    }
     #[test]
     fn summaries_read_changes_in_unopened_repositories_without_staging() {
         let dir = tempfile::tempdir().unwrap();

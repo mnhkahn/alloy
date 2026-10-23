@@ -167,15 +167,40 @@ fn string<'a>(v: &'a Value, key: &str) -> &'a str {
 fn flag(v: &Value, key: &str) -> bool {
     v[key].as_bool().unwrap_or(false)
 }
+fn model_settings(data: &Value, path: &std::path::Path) -> Result<Value, String> {
+    let mut settings = alloy::projects::Projects::read(path)?;
+    let name = string(data, "name");
+    match string(data, "op") {
+        "register_model" => {
+            let model = serde_json::from_value(data["model"].clone()).map_err(|_| "模型配置格式无效。")?;
+            settings.register_model(model)?;
+        }
+        "select_model" => {
+            if !settings.direct_models.iter().any(|m| m.name == name) {return Err("模型已不存在，请刷新后重试。".into());}
+            settings.selected_model = name.into();
+        }
+        "remove_model" => {
+            settings.direct_models.retain(|m| m.name != name);
+            if settings.selected_model == name {settings.selected_model = settings.direct_models.first().map(|m| m.name.clone()).unwrap_or_default();}
+        }
+        _ => return Err("Unknown model settings operation".into()),
+    }
+    settings.save(path)?;
+    Ok(settings.ai_settings())
+}
+
 fn execute(data: &Value, initial: &str) -> Result<Value, String> {
     let op = string(data, "op");
     let path = string(data, "path");
     if op == "projects" || op == "project_summaries" {
         let projects = alloy::projects::Projects::read(&alloy::projects::store_path()?)?;
         if op == "project_summaries" { return Ok(json!({"projects":projects.overview()})); }
-        return Ok(
-            json!({"projects":projects.overview(),"acp_agents":projects.acp_agents,"selected_acp":projects.selected_acp}),
-        );
+        let mut result = projects.ai_settings();
+        result["projects"] = json!(projects.overview());
+        return Ok(result);
+    }
+    if matches!(op, "register_model" | "select_model" | "remove_model") {
+        return model_settings(data, &alloy::projects::store_path()?);
     }
     if op == "save_acp_settings" {
         let agents: Vec<alloy::projects::AcpAgent> =
@@ -212,13 +237,12 @@ fn execute(data: &Value, initial: &str) -> Result<Value, String> {
         let mut settings = alloy::projects::Projects::read(&settings_path)?;
         settings.acp_agents = agents;
         settings.selected_acp = selected_name;
+        if data["activate_acp"] != json!(false) {settings.selected_model.clear();}
         if !selected_path.is_empty() {
             settings.xiaoli_path = selected_path;
         }
         settings.save(&settings_path)?;
-        return Ok(
-            json!({"ok":true,"message":"ACP settings saved.","acp_agents":settings.acp_agents,"selected_acp":settings.selected_acp,"snapshot":null,"document":null}),
-        );
+        return Ok(settings.ai_settings());
     }
     let remembered = if op == "bootstrap" && initial.is_empty() {
         alloy::projects::Projects::read(&alloy::projects::store_path()?)?
@@ -517,7 +541,7 @@ fn execute(data: &Value, initial: &str) -> Result<Value, String> {
     }
     Ok(result)
 }
-fn to_ui(value: Value) -> UiValue {
+pub(crate) fn to_ui(value: Value) -> UiValue {
     match value {
         Value::Null => UiValue::Null,
         Value::Bool(v) => UiValue::Bool(v),
@@ -627,5 +651,28 @@ impl CapabilityHandler for UpdateCapabilities {
             "check" => {crate::updater::check()?; Ok(UiValue::Null)},
             _ => Err("Unknown update action".into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod model_settings_tests {
+    use super::*;
+    #[test]
+    fn register_select_update_remove_and_reload_models() {
+        let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("preferences.json");
+        let mut initial = alloy::projects::Projects::default();initial.remember("/existing/repo");initial.save(&path).unwrap();
+        let register = |name: &str, key: &str| json!({"op":"register_model","model":{"name":name,"base_url":"http://localhost:8000/v1","model":"test-model","api_key":key}});
+        let first = model_settings(&register("first", "test-secret"), &path).unwrap();
+        assert_eq!(first["selected_model"],"first");assert!(!first.to_string().contains("test-secret"));
+        model_settings(&register("second", ""),&path).unwrap();
+        assert_eq!(model_settings(&json!({"op":"select_model","name":"first"}),&path).unwrap()["selected_model"],"first");
+        model_settings(&register("first", ""),&path).unwrap();
+        let saved = alloy::projects::Projects::read(&path).unwrap();
+        assert_eq!(saved.direct_models[0].api_key.as_deref(),Some("test-secret"));
+        assert_eq!(saved.roots,vec!["/existing/repo"]);assert_eq!(saved.acp_agents[0].name,"Xiaoli");
+        assert!(model_settings(&json!({"op":"select_model","name":"missing"}),&path).is_err());
+        assert_eq!(model_settings(&json!({"op":"remove_model","name":"first"}),&path).unwrap()["selected_model"],"second");
+        assert_eq!(model_settings(&json!({"op":"remove_model","name":"second"}),&path).unwrap()["selected_model"],"");
+        assert!(alloy::projects::Projects::read(&path).unwrap().direct_models.is_empty());
     }
 }
