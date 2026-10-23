@@ -74,6 +74,26 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
     .map_err(error)?
     .with_view_id("main");
     life.start(&mut engine).map_err(error)?;
+    // Reproduce an AI result while the user already has a changed file open.
+    // Reloading that selection would clear the pending confirmation on success.
+    let state = |field: &str| runtime.borrow().component_state.get(&state_path, field).cloned().unwrap();
+    if state("sensitive_review") != UiValue::Null {
+        let result = UiValue::Map(BTreeMap::from([
+            ("ok".into(), UiValue::Bool(false)),
+            ("message".into(), state("operation_error")),
+            ("snapshot".into(), state("snapshot")),
+            ("document".into(), UiValue::Null),
+            ("sensitive_review".into(), state("sensitive_review")),
+        ]));
+        let callback = engine.callback(&compiled, "ai_finished").map_err(error)?;
+        let _ = life.invoke_callback_transactional(&engine, &callback, result).map_err(error)?;
+        assert_eq!(state("confirm"), UiValue::String("sensitive-commit".into()));
+        assert_eq!(state("selecting"), UiValue::Bool(false), "confirmation must not trigger a selection reload");
+        let tree = life.render(&mut engine).map_err(error)?;
+        assert_eq!(text_occurrences(tree, "确认并继续 AI 提交"), 1);
+        runtime.borrow_mut().component_state.set(&state_path, "selection_id", UiValue::Integer(0)).map_err(error)?;
+    }
+
     // Exercise layout modes, ancestor visibility, editor and confirmation branches.
     for (name, payload) in [
         ("set_mode", UiValue::String("unified".into())),

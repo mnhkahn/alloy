@@ -151,7 +151,7 @@ fn ai_finished(ctx,result) {
     ctx.set_state("ai_running",false);
     if keep {result.document=current;}
     loaded(ctx,result);
-    if keep {load_selection(ctx,path,staged);}
+    if keep && !("sensitive_review" in result) {load_selection(ctx,path,staged);}
 }
 fn sync_update_guard(ctx) {let s=ctx.get_state("snapshot");ctx.call_capability("alloy.update","guard",#{blocked:watch_blocked(ctx) || (s!=() && s.merging)});}
 fn check_updates(ctx,payload) {

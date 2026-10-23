@@ -173,9 +173,12 @@ mod render_tests {
         let dir = tempfile::tempdir().unwrap();
         alloy::git::run(dir.path(), &["init", "-b", "main"], None).unwrap();
         let repo = alloy::git::Repository::open(dir.path().to_str().unwrap()).unwrap();
+        std::fs::create_dir(dir.path().join("assets")).unwrap();
+        std::fs::write(dir.path().join("assets/code-signing-cert.pem"), "public certificate").unwrap();
+        repo.stage("assets/code-signing-cert.pem").unwrap();
         super::check::check(Some(json!({
             "ok":false,"message":"AI commit blocked: sensitive filenames require your confirmation.",
-            "snapshot":repo.snapshot().unwrap(),"document":null,
+            "snapshot":repo.snapshot().unwrap(),"document":repo.document("assets/code-signing-cert.pem", false).unwrap(),
             "sensitive_review":{"files":["assets/code-signing-cert.pem"],"tree":"reviewed-tree","root":repo.root.to_string_lossy()}
         }))).unwrap();
     }
