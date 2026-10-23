@@ -397,7 +397,23 @@ fn execute(data: &Value, initial: &str) -> Result<Value, String> {
             message = "Committed staged changes.".into();
         }
         "ai_commit" => {
-            let generated = alloy::cmsg::generate_and_commit(&repo)?;
+            let confirmed_tree = string(data, "confirmed_tree");
+            if let Some((files, tree)) = alloy::cmsg::sensitive_review(&repo)? {
+                if confirmed_tree != tree {
+                    return Ok(
+                        json!({"ok":false,"message":"AI commit blocked: sensitive filenames require your confirmation.","snapshot":repo.snapshot()?,"document":null,
+                        "sensitive_review":{"files":files,"tree":tree,"root":repo.root.to_string_lossy()}}),
+                    );
+                }
+            }
+            let generated = alloy::cmsg::generate_and_commit_confirmed(
+                &repo,
+                if confirmed_tree.is_empty() {
+                    None
+                } else {
+                    Some(confirmed_tree)
+                },
+            )?;
             commit_message = Some(generated.message);
             match generated.commit_result {
                 Ok(_) => {

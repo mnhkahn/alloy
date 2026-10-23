@@ -169,6 +169,17 @@ mod tests {
 mod render_tests {
     use serde_json::json;
     #[test]
+    fn renders_sensitive_commit_confirmation_and_error() {
+        let dir = tempfile::tempdir().unwrap();
+        alloy::git::run(dir.path(), &["init", "-b", "main"], None).unwrap();
+        let repo = alloy::git::Repository::open(dir.path().to_str().unwrap()).unwrap();
+        super::check::check(Some(json!({
+            "ok":false,"message":"AI commit blocked: sensitive filenames require your confirmation.",
+            "snapshot":repo.snapshot().unwrap(),"document":null,
+            "sensitive_review":{"files":["assets/code-signing-cert.pem"],"tree":"reviewed-tree","root":repo.root.to_string_lossy()}
+        }))).unwrap();
+    }
+    #[test]
     fn renders_image_versions() {
         let dir = tempfile::tempdir().unwrap();
         alloy::git::run(dir.path(), &["init", "-b", "main"], None).unwrap();

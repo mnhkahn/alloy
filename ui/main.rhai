@@ -48,13 +48,16 @@ fn state_schema() { #{ fields: #{
     history_doc: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
     file_menu: string_field(""), rollback_path: string_field(""), delete_path: string_field(""),
     committed_paths: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
+    operation_error: string_field(""),
+    sensitive_review: #{schema:#{type:"ui_value"}, "default":#{type:"null"}},
     busy: bool_field(false), ai_running: bool_field(false), editor: bool_field(false), base_view: bool_field(false),
     snapshot: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
     doc: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } }
 } } }
 fn dirty(ctx) { let d = ctx.get_state("doc"); d != () && ctx.get_state("draft") != d.right }
 fn status(ctx, message) { ctx.set_state("message", message); }
-fn failed(ctx, error) { ctx.set_state("busy", false); status(ctx, `${error}`); }
+fn failed(ctx, error) { ctx.set_state("busy", false); ctx.set_state("operation_error", `${error}`); status(ctx, `${error}`); }
+fn dismiss_error(ctx,payload) {ctx.set_state("operation_error","");}
 fn prepare_images(ctx, document) {
     if document == () || document.images == () { return document; }
     for side in ["left", "right"] {
@@ -72,6 +75,8 @@ fn loaded(ctx, result) {
     if "document" in result { result.document = prepare_images(ctx, result.document); }
     if !ctx.get_state("ai_running") {ctx.set_state("busy", false);}
     status(ctx, result.message);
+    if !result.ok {ctx.set_state("operation_error",result.message);}
+    if "sensitive_review" in result {ctx.set_state("sensitive_review",result.sensitive_review);ctx.set_state("confirm","sensitive-commit");}
     if "tag_retry" in result { ctx.set_state("tag",result.tag_retry); ctx.set_state("confirm","tag-retry"); }
     if "overview" in result { let projects = project_list(ctx); let found = false; for i in 0..projects.len() { if projects[i].root == result.overview.root { projects[i] = result.overview; found = true; } } if !found { projects.push(result.overview); } ctx.set_state("projects",projects); }
     if result.snapshot != () {
@@ -127,7 +132,7 @@ fn request(ctx, op, extra) {
     let repo_root = if op == "open" || op == "clone" || active == () { ctx.get_state("root") } else { active.root };
     let data = #{ op: op, root: repo_root, path: if d == () { "" } else { d.path }, staged: ctx.get_state("tab") == "staged" };
     for key in extra.keys() { data[key] = extra[key]; }
-    ctx.set_state("busy", true); sync_update_guard(ctx);status(ctx, `${op}…`);
+    ctx.set_state("operation_error","");ctx.set_state("busy", true); sync_update_guard(ctx);status(ctx, `${op}…`);
     if op == "ai_commit" {
         ctx.set_state("ai_running",true);
         ctx.start_task("alloy.git", "execute", data, Fn("ai_finished"), Fn("ai_failed"));
@@ -229,6 +234,11 @@ fn push_prepared(ctx,result) {
 fn pull_prompt(ctx,payload) {if guard(ctx) && ctx.get_state("snapshot") != () {ctx.set_state("confirm","pull");}}
 fn network_confirm(ctx,payload) {if !guard(ctx) {return;}let op=ctx.get_state("confirm");if op == "push" {ctx.set_state("confirm","");request(ctx,"push",#{allow_upstream:true});} else if op == "pull" {ctx.set_state("confirm","");network(ctx,op);}}
 fn commit_shortcut(ctx,payload) {if ctx.get_state("snapshot") != () && has_message(ctx) && selected_count(ctx)>0 {commit(ctx,());} else {status(ctx,"Stage changes and enter a commit message first.");}}
+fn sensitive_commit_now(ctx,payload) {
+    let review=ctx.get_state("sensitive_review"); let s=ctx.get_state("snapshot");
+    if review==() || s==() || review.root!=s.root {return;}
+    if guard(ctx) {ctx.set_state("confirm","");ctx.set_state("sensitive_review",());request(ctx,"ai_commit",#{confirmed_tree:review.tree});}
+}
 fn ai_commit(ctx,payload) {if guard(ctx) && ctx.get_state("snapshot") != () {request(ctx,"ai_commit",#{});}}
 fn palette_open(ctx,mode) {ctx.set_state("palette_query","");ctx.set_state("palette",mode);}
 fn find_action(ctx,payload) {palette_open(ctx,"actions");}
@@ -265,7 +275,7 @@ fn closing(ctx, payload) {
     else { ctx.close_window(ctx.window_id()); }
 }
 fn close_now(ctx, payload) { ctx.close_window(ctx.window_id()); }
-fn cancel(ctx, payload) { ctx.set_state("confirm", ""); ctx.set_state("tag", ()); ctx.set_state("tag_choice", ""); }
+fn cancel(ctx, payload) { ctx.set_state("sensitive_review",()); ctx.set_state("confirm", ""); ctx.set_state("tag", ()); ctx.set_state("tag_choice", ""); }
 fn project_list(ctx) { let value = ctx.get_state("projects"); if value == () {[]} else {value} }
 fn refresh_project_summaries(ctx,payload) {
     if ctx.get_state("summaries_pending") {return;}
@@ -583,6 +593,16 @@ fn tag_retry_bar(ctx) {
 fn confirmation(ctx) {
     let c = ctx.get_state("confirm");
     if c == "" { return row([]); }
+    if c == "sensitive-commit" {
+        let review=ctx.get_state("sensitive_review"); if review==() {return row([]);}
+        let files=""; for path in review.files {if files!="" {files+="\n";} files+=path;}
+        return column([
+            text("AI 提交已拦截：以下文件名命中敏感文件规则").with_style(style().font_weight(700).text_color(theme_color("danger"))),
+            text(files).with_style(style().max_height(px(120)).overflow_y_scroll()),
+            text("请人工确认这些文件可以发送给所选 AI 代理并提交到 Git。授权仅对本次暂存内容有效。"),
+            row([button(ctx,"确认并继续 AI 提交",Fn("sensitive_commit_now"),(),true),button(ctx,"取消",Fn("cancel"),(),true)]).with_style(style().gap(px(8)))
+        ]).with_style(style().padding(px(12)).gap(px(8)).flex_shrink(false).background(theme_color("surface_raised")).border(px(1)).border_color(theme_color("danger")));
+    }
     if c == "tag" { return tag_bump_bar(ctx); }
     if c == "tag-go" { return tag_go_bar(ctx); }
     if c == "tag-retry" { return tag_retry_bar(ctx); }
@@ -978,6 +998,12 @@ fn status_bar(ctx,s) {
         repository_status(ctx,s)
     ]).with_key("status-bar").with_style(style().padding_x(px(10)).padding_y(px(4)).min_height(px(24)).flex_shrink(false).gap(px(12)).items_center().justify_between().background(theme_color("surface_raised")))
 }
+fn error_banner(ctx) {
+    let message=ctx.get_state("operation_error");
+    if message=="" {return row([]);}
+    row([text(`操作失败：${message}`).with_style(style().flex_grow().min_width(px(0)).max_height(px(140)).overflow_y_scroll().font_weight(600).text_color(theme_color("danger"))),button(ctx,"关闭提示",Fn("dismiss_error"),(),true)])
+        .with_key("operation-error").with_style(style().padding(px(12)).gap(px(12)).flex_shrink(false).border(px(1)).border_color(theme_color("danger")).background(theme_color("surface_raised")))
+}
 fn view(ctx) {
     if ctx.get_state("acp_page_open") {return acp_config_page(ctx);}
     let s = ctx.get_state("snapshot");
@@ -1004,7 +1030,7 @@ fn view(ctx) {
             small("Full-context diffs  /  Editable results  /  Three-way conflict resolution")
         ]).with_style(style().flex_grow().justify_center().padding(px(90)).gap(px(20)))
     } else if ctx.get_state("log_mode") {history_view(ctx,s)} else { row(if ctx.get_state("sidebar_visible") {[sidebar(ctx,s),content(ctx)]} else {[content(ctx)]}).with_style(style().flex_grow().min_height(px(0)).min_width(px(0))) };
-    column([watch_timer::WatchTimer(#{key:"watch-timer",sequence:ctx.get_state("watch_tick_id"),on_tick:Fn("watch_tick")}),header,pathbar,project_form(ctx),palette_view(ctx),confirmation(ctx),body,
+    column([watch_timer::WatchTimer(#{key:"watch-timer",sequence:ctx.get_state("watch_tick_id"),on_tick:Fn("watch_tick")}),header,pathbar,project_form(ctx),palette_view(ctx),error_banner(ctx),confirmation(ctx),body,
         status_bar(ctx,s)
     ]).with_style(style().font_size(px(13)).line_height(px(18)).width(relative(1)).height(relative(1)).min_width(px(0)).min_height(px(0)).background(theme_color("surface")).text_color(theme_color("text_primary")))
 }

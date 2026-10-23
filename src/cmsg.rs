@@ -35,6 +35,14 @@ pub struct PreparedDiff {
 
 /// Read only explicitly staged changes. Never add working-tree files implicitly.
 pub fn prepare(repo: &Repository) -> Result<PreparedDiff, String> {
+    prepare_confirmed(repo, None)
+}
+
+/// Approval is scoped to the exact staged tree, never saved as a preference.
+pub fn prepare_confirmed(
+    repo: &Repository,
+    confirmed_tree: Option<&str>,
+) -> Result<PreparedDiff, String> {
     let files = repo.staged_names()?;
     if files.is_empty() {
         return Err(
@@ -46,7 +54,7 @@ pub fn prepare(repo: &Repository) -> Result<PreparedDiff, String> {
         .filter(|f| sensitive(f))
         .map(String::as_str)
         .collect();
-    if !blocked.is_empty() {
+    if !blocked.is_empty() && confirmed_tree != Some(staged_tree(repo)?.as_str()) {
         return Err(format!(
             "Refusing to auto-commit sensitive files: {}. Unstage them first.",
             blocked.join(", ")
@@ -57,6 +65,26 @@ pub fn prepare(repo: &Repository) -> Result<PreparedDiff, String> {
         stat: repo.staged_numstat()?,
         diff: repo.staged_diff()?,
     })
+}
+
+/// Return the files requiring review and a token for this exact staged content.
+pub fn sensitive_review(repo: &Repository) -> Result<Option<(Vec<String>, String)>, String> {
+    let files: Vec<String> = repo
+        .staged_names()?
+        .into_iter()
+        .filter(|p| sensitive(p))
+        .collect();
+    if files.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some((files, staged_tree(repo)?)))
+    }
+}
+
+fn staged_tree(repo: &Repository) -> Result<String, String> {
+    String::from_utf8(crate::git::run(&repo.root, &["write-tree"], None)?)
+        .map(|s| s.trim().to_string())
+        .map_err(|e| e.to_string())
 }
 
 /// Filename rules only; file contents are never scanned.
@@ -177,7 +205,14 @@ pub struct GeneratedCommit {
 
 /// Full Cmd+K flow: staged diff → compact → model → sanitize → commit. No push.
 pub fn generate_and_commit(repo: &Repository) -> Result<GeneratedCommit, String> {
-    let prepared = prepare(repo)?;
+    generate_and_commit_confirmed(repo, None)
+}
+
+pub fn generate_and_commit_confirmed(
+    repo: &Repository,
+    confirmed_tree: Option<&str>,
+) -> Result<GeneratedCommit, String> {
+    let prepared = prepare_confirmed(repo, confirmed_tree)?;
     let diff = compact(&prepared.diff);
     let user = format!(
         "请为以下暂存的变更生成提交信息。\n\n文件列表：\n{}\n\n统计：\n{}\n\nDiff：\n{}",
@@ -188,7 +223,13 @@ pub fn generate_and_commit(repo: &Repository) -> Result<GeneratedCommit, String>
     let raw = acp::generate(&repo.root, SYSTEM_PROMPT, &user)?;
     let message = sanitize(&raw)?;
     // Keep the generated text available to the UI even when Git rejects the commit.
-    let commit_result = repo.commit(&message);
+    let commit_result = if confirmed_tree.is_some()
+        && confirmed_tree != Some(staged_tree(repo)?.as_str())
+    {
+        Err("Staged changes changed after confirmation. Review and confirm again before committing.".into())
+    } else {
+        repo.commit(&message)
+    };
     Ok(GeneratedCommit {
         message,
         commit_result,
