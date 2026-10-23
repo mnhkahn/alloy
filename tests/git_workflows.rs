@@ -1384,3 +1384,26 @@ fn delete_file_handles_untracked_binary_and_rejects_unsafe_paths() {
         assert_eq!(fs::read_to_string(target).unwrap(), "keep");
     }
 }
+
+#[test]
+fn sensitive_commit_approval_is_limited_to_reviewed_staged_content() {
+    let (_dir, repo) = fixture();
+    fs::write(repo.root.join("cert.pem"), "public certificate").unwrap();
+    repo.stage("cert.pem").unwrap();
+    let (files, token) = alloy::cmsg::sensitive_review(&repo).unwrap().unwrap();
+    assert_eq!(files, vec!["cert.pem"]);
+    assert!(
+        alloy::cmsg::prepare(&repo)
+            .unwrap_err()
+            .contains("cert.pem")
+    );
+    assert!(alloy::cmsg::prepare_confirmed(&repo, Some(&token)).is_ok());
+    // Approval never changes the default, even for the same repository.
+    assert!(alloy::cmsg::prepare(&repo).is_err());
+    fs::write(repo.root.join("cert.pem"), "changed certificate").unwrap();
+    repo.stage("cert.pem").unwrap();
+    assert!(alloy::cmsg::prepare_confirmed(&repo, Some(&token)).is_err());
+    let (_, fresh_token) = alloy::cmsg::sensitive_review(&repo).unwrap().unwrap();
+    assert!(alloy::cmsg::prepare_confirmed(&repo, Some(&fresh_token)).is_ok());
+    assert_ne!(token, fresh_token);
+}
