@@ -342,6 +342,10 @@ fn execute(data: &Value, initial: &str) -> Result<Value, String> {
                 repo.stage_committed_changes()?;
             }
         }
+        "add_to_gitignore" => {
+            repo.add_to_gitignore(path)?;
+            message = "Added to .gitignore; files already tracked by Git remain tracked".into();
+        }
         "delete_file" => {
             repo.delete_file(path)?;
             message = "File deleted from working tree".into();

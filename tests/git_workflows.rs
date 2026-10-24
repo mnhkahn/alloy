@@ -1346,6 +1346,81 @@ fn upstream_detection_uses_configuration_even_without_a_tracking_ref() {
 }
 
 #[test]
+fn gitignore_uses_literal_root_relative_rules_and_preserves_files() {
+    let (_dir, r) = fixture();
+    fs::create_dir(r.root.join("nested")).unwrap();
+    for path in ["cache.txt", "nested/![cache]*? #\\.txt "] {
+        fs::write(r.root.join(path), "keep").unwrap();
+        r.add_to_gitignore(path).unwrap();
+        assert_eq!(fs::read_to_string(r.root.join(path)).unwrap(), "keep");
+        assert!(run(&r.root, &["--no-literal-pathspecs", "check-ignore", "--", path], None).is_ok());
+        assert!(!r.snapshot().unwrap().files.iter().any(|f| f.path == path));
+    }
+    fs::write(r.root.join("nested/cache.txt"), "keep").unwrap();
+    assert!(run(&r.root, &["--no-literal-pathspecs", "check-ignore", "--", "nested/cache.txt"], None).is_err());
+    assert_eq!(run(&r.root, &["diff", "--cached"], None).unwrap(), b"");
+}
+
+#[test]
+fn gitignore_preserves_existing_rules_and_tracking() {
+    let (_dir, r) = fixture();
+    fs::write(r.root.join(".gitignore"), "# existing\n*.log").unwrap();
+    fs::write(r.root.join("file.txt"), "modified").unwrap();
+    r.stage("file.txt").unwrap();
+    let index = run(&r.root, &["write-tree"], None).unwrap();
+    r.add_to_gitignore("file.txt").unwrap();
+    r.add_to_gitignore("file.txt").unwrap();
+    assert_eq!(
+        fs::read_to_string(r.root.join(".gitignore")).unwrap(),
+        "# existing\n*.log\n/file.txt\n"
+    );
+    assert_eq!(run(&r.root, &["write-tree"], None).unwrap(), index);
+    assert!(
+        r.snapshot()
+            .unwrap()
+            .files
+            .iter()
+            .any(|f| f.path == "file.txt")
+    );
+    fs::write(r.root.join(".gitignore"), "/file.txt\n!/file.txt\n").unwrap();
+    r.add_to_gitignore("file.txt").unwrap();
+    assert!(
+        run(
+            &r.root,
+            &["--no-literal-pathspecs", "check-ignore", "--no-index", "--", "file.txt"],
+            None
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn gitignore_rejects_unsafe_paths_and_symlink_destination() {
+    let (_dir, r) = fixture();
+    for path in [
+        "../outside",
+        ".git/config",
+        ".gitignore",
+        "line\nbreak",
+        "line\rbreak",
+        "file.txt",
+    ] {
+        assert!(r.add_to_gitignore(path).is_err(), "{path:?}");
+    }
+    assert!(!r.root.join(".gitignore").exists());
+    #[cfg(unix)]
+    {
+        let outside = TempDir::new().unwrap();
+        let target = outside.path().join("keep");
+        fs::write(&target, "unchanged").unwrap();
+        std::os::unix::fs::symlink(&target, r.root.join(".gitignore")).unwrap();
+        fs::write(r.root.join("new.txt"), "keep").unwrap();
+        assert!(r.add_to_gitignore("new.txt").is_err());
+        assert_eq!(fs::read_to_string(target).unwrap(), "unchanged");
+    }
+}
+
+#[test]
 fn delete_file_removes_working_copy_and_preserves_staged_content() {
     let (_dir, r) = fixture();
     fs::write(r.root.join("file.txt"), "staged content\n").unwrap();

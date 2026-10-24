@@ -431,6 +431,7 @@ fn file_action(path, ctx, action) {
         ctx.start_task("alloy.git","execute",#{op:if action=="open-file" {"open_file"} else {"open_folder"},root:ctx.get_state("snapshot").root,path:path},Fn("file_opened"),Fn("file_open_failed"));
         return;
     }
+    if action == "add-to-gitignore" && guard(ctx) && !ctx.get_state("snapshot").merging {request(ctx,"add_to_gitignore",#{path:path,staged:false});}
     if action == "rollback" && guard(ctx) && can_rollback(ctx,path) {ctx.set_state("rollback_path",path);ctx.set_state("confirm","rollback");}
     if action == "delete-file" && guard(ctx) && !ctx.get_state("snapshot").merging {ctx.set_state("delete_path",path);ctx.set_state("confirm","delete-file");}
 }
@@ -749,7 +750,7 @@ fn sidebar(ctx,s) {
             let row_style = style().height(px(26)).min_height(px(26)).flex_shrink(false).padding_left(px(22)).padding_right(px(6)).gap(px(6)).items_center();
             let row_style = row_style.radius(px(3)).background(if selected {theme_color("selection")} else {theme_color("surface_raised")}).hover(style().background(theme_color("surface_hover")));
             let file_row = row([check_box(ctx,`Stage ${f.path}`,f.path in checked && checked[f.path],f.path in partial,Fn("toggle_include"),f.path,!f.conflict && !s.merging),label]).with_key(`file-${f.path}`).with_style(row_style);
-            items.push(context_menu::ContextMenu(#{key:`file-menu-${f.path}`,label:`Actions for ${f.path}`,trigger:file_row,open:ctx.get_state("file_menu")==f.path,active_value:"open-file",items:[#{kind:"item",value:"open-file",label:"Open",disabled:f.work == "D" || f.index == "D" && f.work == " "},#{kind:"item",value:"open-folder",label:"Open Folder"},#{kind:"separator"},#{kind:"item",value:"rollback",label:"Rollback",disabled:!can_rollback(ctx,f.path) || s.merging || ctx.get_state("busy") || ctx.get_state("selecting") || dirty(ctx)},#{kind:"item",value:"delete-file",label:"Delete",disabled:f.work == "D" || f.index == "D" && f.work == " " || s.merging || ctx.get_state("busy") || ctx.get_state("selecting") || dirty(ctx)}],on_open_change:Fn("file_menu_open").curry(f.path),on_action:Fn("file_action").curry(f.path)}));
+            items.push(context_menu::ContextMenu(#{key:`file-menu-${f.path}`,label:`Actions for ${f.path}`,trigger:file_row,open:ctx.get_state("file_menu")==f.path,active_value:"open-file",items:[#{kind:"item",value:"open-file",label:"Open",disabled:f.work == "D" || f.index == "D" && f.work == " "},#{kind:"item",value:"open-folder",label:"Open Folder"},#{kind:"separator"},#{kind:"item",value:"add-to-gitignore",label:"Add to .gitignore",disabled:f.path == ".gitignore" || s.merging || ctx.get_state("busy") || ctx.get_state("selecting") || dirty(ctx)},#{kind:"item",value:"rollback",label:"Rollback",disabled:!can_rollback(ctx,f.path) || s.merging || ctx.get_state("busy") || ctx.get_state("selecting") || dirty(ctx)},#{kind:"item",value:"delete-file",label:"Delete",disabled:f.work == "D" || f.index == "D" && f.work == " " || s.merging || ctx.get_state("busy") || ctx.get_state("selecting") || dirty(ctx)}],on_open_change:Fn("file_menu_open").curry(f.path),on_action:Fn("file_action").curry(f.path)}));
         }
     }
     let can_commit = has_message(ctx) && selected_count(ctx) > 0;

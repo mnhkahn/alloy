@@ -589,6 +589,56 @@ impl Repository {
         fs::remove_file(full).map_err(err)
     }
 
+    /// Add an exact root-relative ignore rule without changing the index.
+    pub fn add_to_gitignore(&self, path: &str) -> Result<()> {
+        self.safe_path(path)?;
+        if path.contains(['\n', '\r', '\0']) || path == ".gitignore" {
+            return Err("This path cannot be added to .gitignore.".into());
+        }
+        let snapshot = self.snapshot()?;
+        if snapshot.merging || snapshot.files.iter().any(|f| f.conflict) {
+            return Err("Finish the merge before changing .gitignore.".into());
+        }
+        if !snapshot.files.iter().any(|f| f.path == path) {
+            return Err("File is no longer in the change list; refresh before ignoring.".into());
+        }
+        let full = self.safe_path(".gitignore")?;
+        let mut pattern = String::from("/");
+        for c in path.chars() {
+            if matches!(c, '\\' | '*' | '?' | '[' | ']' | ' ' | '#' | '!') {
+                pattern.push('\\');
+            }
+            pattern.push(c);
+        }
+        let current = match fs::read(&full) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(err(e)),
+        };
+        // Only the final rule is safe to deduplicate: later negations can override it.
+        if current
+            .strip_suffix(b"\n")
+            .unwrap_or(&current)
+            .rsplit(|b| *b == b'\n')
+            .next()
+            .is_some_and(|line| line.strip_suffix(b"\r").unwrap_or(line) == pattern.as_bytes())
+        {
+            return Ok(());
+        }
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(full)
+            .map_err(err)?;
+        let mut addition = Vec::new();
+        if !current.is_empty() && !current.ends_with(b"\n") {
+            addition.push(b'\n');
+        }
+        addition.extend_from_slice(pattern.as_bytes());
+        addition.push(b'\n');
+        file.write_all(&addition).map_err(err)
+    }
+
     /// Restore committed files only. New files, including staged additions, survive.
     pub fn rollback(&self, path: Option<&str>) -> Result<()> {
         let snapshot = self.snapshot()?;
