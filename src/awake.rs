@@ -230,14 +230,17 @@ mod tests {
             .args(["-g", "assertions"])
             .output()
             .unwrap();
-        assert!(
-            String::from_utf8_lossy(&assertions.stdout)
-                .lines()
-                .any(
-                    |line| line.contains(&format!("pid {}(", std::process::id()))
+        let assertions = String::from_utf8_lossy(&assertions.stdout);
+        for kind in ["PreventUserIdleSystemSleep", "PreventUserIdleDisplaySleep"] {
+            assert!(
+                assertions.lines().any(|line| {
+                    line.contains(&format!("pid {}(", std::process::id()))
                         && line.contains("Alloy: Codex or Herdr is working")
-                )
-        );
+                        && line.contains(kind)
+                }),
+                "missing {kind}: {assertions}"
+            );
+        }
         monitor.set_enabled(false);
         let assertions = std::process::Command::new("pmset")
             .args(["-g", "assertions"])

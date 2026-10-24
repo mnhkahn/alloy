@@ -14,7 +14,7 @@ fn state_schema() { #{ fields: #{
     watch_epoch: #{schema:#{type:"integer"}, "default":#{type:"integer",value:0}},
     watch_seen: #{schema:#{type:"integer"}, "default":#{type:"integer",value:0}},
     watch_pending: bool_field(false), watch_root: string_field(""),
-    awake_enabled: bool_field(false), awake_active: bool_field(false), awake_detail: string_field("勾选后，在 Codex 或 Herdr 工作时保持系统唤醒；允许锁屏和熄屏。"),
+    awake_enabled: bool_field(false), awake_active: bool_field(false), awake_detail: string_field("勾选后，在 Codex 或 Herdr 工作时保持系统和屏幕唤醒，防止闲置熄屏后自动锁屏。"),
     awake_open: bool_field(false), awake_error: string_field(""),
     awake_agents: #{schema:#{type:"ui_value"}, "default":#{type:"null"}},
     root: string_field(""), url: string_field(""), filter: string_field(""), message: string_field("Opening Alloy…"), commit: string_field(""),
@@ -671,7 +671,7 @@ fn awake_agents(ctx) {let agents=ctx.get_state("awake_agents");if agents==() {[]
 fn awake_update(ctx,result) {
     ctx.set_state("awake_enabled",result.enabled);ctx.set_state("awake_active",result.active);
     ctx.set_state("awake_agents",result.agents);ctx.set_state("awake_error",result.error);
-    let detail=if !result.enabled {"防休眠已关闭；勾选后在 Agent 工作时保持系统唤醒。"} else if result.active {"正在保持系统唤醒，允许锁屏和熄屏。"} else {"防休眠已启用，等待 Agent 开始工作。"};
+    let detail=if !result.enabled {"防休眠已关闭；勾选后在 Agent 工作时保持系统唤醒。"} else if result.active {"正在保持系统和屏幕唤醒，防止闲置熄屏后自动锁屏；仍可手动锁屏。"} else {"防休眠已启用，等待 Agent 开始工作。"};
     if result.error!="" {detail+=" 检测异常："+result.error;}
     ctx.set_state("awake_detail",detail);
 }
