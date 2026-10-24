@@ -1,0 +1,56 @@
+name: Warm macOS release cache
+
+on:
+  push:
+    branches: ['**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-cache-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  warm-release-cache:
+    # Tag workflows can restore the default branch's cache, but not another tag's.
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: alloy
+        shell: bash
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '12.0'
+      CARGO_TERM_COLOR: always
+    steps:
+      # Match release.yml's sibling layout, dependency revision and patches.
+      - uses: actions/checkout@v4
+        with:
+          path: alloy
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: eddix/gpui-rhai
+          ref: d87ebb9f781ecaaa53e265d39b9cacc7ded07f25
+          path: gpui-rhai
+          persist-credentials: false
+      - name: Prepare pinned GUI dependency
+        run: sh scripts/prepare-dependency.sh
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: alloy
+          shared-key: macos-release-${{ matrix.arch }}
+      - name: Warm optimized release dependencies
+        run: cargo build --release --locked

@@ -24,6 +24,12 @@ scripts/package.sh             # dist/Alloy.app (local ad-hoc signature)
 scripts/package.sh debug       # faster local development bundle
 ```
 
+## Release build cache
+
+The `Warm macOS release cache` workflow builds optimized dependencies for Apple Silicon and Intel on each default-branch push, or when run manually on that branch. It uses the same sibling checkout layout, pinned `gpui-rhai` revision, patches, Rust toolchain, macOS deployment target and architecture-specific shared cache keys as the Release workflow. Release tag builds restore this cache without saving another tag-scoped copy.
+
+After enabling this workflow, let both architecture jobs finish on the default branch before pushing the next release tag. The first warm-up is a full build and adds default-branch CI usage. Later releases can reuse compiled dependencies; Alloy itself still recompiles, and dependency or toolchain changes can require rebuilding dependencies. Release optimization settings remain unchanged. Actual release timings depend on cache hits and runner performance.
+
 ## Automatic updates
 
 Packaged Alloy apps embed Sparkle 2.10.0, a free macOS updater. Updates… checks manually; automatic checks run hourly and download signed updates in the background. Sparkle installs to the existing app location when you quit, with macOS authorization if that location requires it. A requested update restart waits while a draft is unsaved, Git/ACP work is in flight, a confirmation is open, or a merge is unfinished. Native update dialogs provide installation and download errors. Development launches without an app bundle disable the update button.

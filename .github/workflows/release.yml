@@ -47,11 +47,16 @@ jobs:
           ref: d87ebb9f781ecaaa53e265d39b9cacc7ded07f25
           path: gpui-rhai
           persist-credentials: false
+      - name: Prepare pinned GUI dependency
+        run: sh scripts/prepare-dependency.sh
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: alloy
-          key: release-${{ matrix.arch }}
+          shared-key: macos-release-${{ matrix.arch }}
+          # Default-branch ci.yml seeds this cache for both architectures.
+          # A tag-scoped cache cannot be reused by the next release.
+          save-if: 'false'
       - name: Test native update restart guard
         run: sh scripts/test-updater.sh
       - name: Build release app
