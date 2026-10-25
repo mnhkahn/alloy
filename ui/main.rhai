@@ -72,6 +72,16 @@ fn prepare_images(ctx, document) {
     }
     document
 }
+// Compare staged file membership and full/partial inclusion independently of file order.
+fn commit_selection(snapshot) {
+    let selected = #{};
+    if snapshot != () {for file in snapshot.files {
+        if file.index != " " && file.index != "?" && !file.conflict {
+            selected[file.path] = #{index:file.index,old_path:file.old_path,full:file.work == " "};
+        }
+    }}
+    selected
+}
 fn loaded(ctx, result) {
     let prior=ctx.get_state("snapshot");
     let entering_merge=result.snapshot != () && result.snapshot.merging && (prior==() || !prior.merging);
@@ -90,10 +100,13 @@ fn loaded(ctx, result) {
         if switched {
             ctx.set_state("log_mode",false);ctx.set_state("history_commits",[]);ctx.set_state("history_details",());ctx.set_state("history_doc",());ctx.set_state("history_file","");ctx.set_state("history_selected","");ctx.set_state("history_more",false);
             let sessions = ctx.get_state("project_sessions"); if sessions == () { sessions = #{}; }
-            if previous_snapshot != () { sessions[previous_snapshot.root] = #{commit:ctx.get_state("commit"),filter:ctx.get_state("filter")}; }
-            let saved = if result.snapshot.root in sessions {sessions[result.snapshot.root]} else {#{commit:"",filter:""}};
-            ctx.set_state("commit",saved.commit); ctx.set_state("filter",saved.filter); ctx.set_state("project_sessions",sessions);
+            if previous_snapshot != () { sessions[previous_snapshot.root] = #{commit:ctx.get_state("commit"),filter:ctx.get_state("filter"),selection:commit_selection(previous_snapshot)}; }
+            let saved = if result.snapshot.root in sessions {sessions[result.snapshot.root]} else {#{commit:"",filter:"",selection:#{}}};
+            ctx.set_state("commit",if result.snapshot.merging || saved.selection == commit_selection(result.snapshot) {saved.commit} else {""}); ctx.set_state("filter",saved.filter); ctx.set_state("project_sessions",sessions);
             ctx.set_state("included",#{}); ctx.set_state("collapsed",#{}); ctx.set_state("editor",false); ctx.set_state("base_view",false);
+        }
+        if !switched && !result.snapshot.merging && commit_selection(previous_snapshot) != commit_selection(result.snapshot) {
+            ctx.set_state("commit", "");
         }
         let current = #{}; let mixed = #{};
         if switched {ctx.set_state("open_tabs",[]);}
@@ -135,6 +148,11 @@ fn request(ctx, op, extra) {
     let repo_root = if op == "open" || op == "clone" || active == () { ctx.get_state("root") } else { active.root };
     let data = #{ op: op, root: repo_root, path: if d == () { "" } else { d.path }, staged: ctx.get_state("tab") == "staged" };
     for key in extra.keys() { data[key] = extra[key]; }
+    // Clear immediately when a staging change starts, including changing blocks in
+    // an already selected file; waiting for Git's reply leaves stale text visible.
+    if active != () && !active.merging && ["stage_paths","stage_hunks","stage","unstage"].contains(op) {
+        ctx.set_state("commit", "");
+    }
     ctx.set_state("operation_error","");ctx.set_state("busy", true); sync_update_guard(ctx);status(ctx, `${op}…`);
     if op == "ai_commit" {
         ctx.set_state("ai_running",true);

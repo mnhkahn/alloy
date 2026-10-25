@@ -804,6 +804,65 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
         assert_eq!(get("message"), UiValue::String(status_text.into()));
         life.render(&mut engine).map_err(error)?;
     }
+    // Commit text belongs to the staged selection, not the currently previewed file.
+    // Drive real lifecycle callbacks so automatic refresh and project-session restore
+    // exercise the same invalidation path as interactive staging.
+    let invoke = |life: &mut ScriptLifecycle, name: &str, payload: UiValue| -> Result<(), String> {
+        let callback = engine.callback(&compiled, name).map_err(error)?;
+        let _ = life.invoke_callback_transactional(&engine, &callback, payload).map_err(error)?;
+        Ok(())
+    };
+    let file = |path: &str, index: &str, work: &str| serde_json::json!({
+        "path":path,"old_path":"","index":index,"work":work,"conflict":false
+    });
+    let selection_snapshot = |root: &str, files: Vec<serde_json::Value>| serde_json::json!({
+        "root":root,"branch":"main","upstream":"","ahead":0,"behind":0,
+        "merging":false,"files":files
+    });
+    let selection_reply = |snapshot: serde_json::Value, generated: Option<&str>| {
+        let mut reply = serde_json::json!({"ok":true,"message":"Selection check","snapshot":snapshot,"document":null});
+        if let Some(message) = generated { reply["commit_message"] = message.into(); }
+        crate::bridge::to_ui(reply)
+    };
+    let staged = file("a.rs", "M", " ");
+    let unstaged = file("b.rs", " ", "M");
+    let root = "/alloy-test/commit-selection";
+    let original = selection_snapshot(root, vec![staged.clone(), unstaged.clone()]);
+    invoke(&mut life, "loaded", selection_reply(original.clone(), Some("previous generated message")))?;
+    for files in [
+        vec![staged.clone(), unstaged.clone()],
+        vec![unstaged.clone(), staged.clone()],
+        vec![staged.clone(), unstaged.clone(), file("new.rs", "?", "?")],
+    ] {
+        invoke(&mut life, "loaded", selection_reply(selection_snapshot(root, files), None))?;
+        assert_eq!(get("commit"), UiValue::String("previous generated message".into()), "unchanged staging must retain the message");
+    }
+    let changed = selection_snapshot(root, vec![staged.clone(), file("b.rs", "M", " ")]);
+    invoke(&mut life, "loaded", selection_reply(changed.clone(), None))?;
+    assert_eq!(get("commit"), UiValue::String(String::new()), "external staging change must clear stale text");
+    invoke(&mut life, "loaded", selection_reply(original.clone(), Some("new generated message")))?;
+    assert_eq!(get("commit"), UiValue::String("new generated message".into()), "a new generation overrides invalidation in its own result");
+    let partial = selection_snapshot(root, vec![file("a.rs", "M", "M"), unstaged.clone()]);
+    invoke(&mut life, "loaded", selection_reply(partial, None))?;
+    assert_eq!(get("commit"), UiValue::String(String::new()), "full to partial inclusion must clear stale text");
+    for (action, payload) in [
+        ("toggle_include", UiValue::String("a.rs".into())),
+        ("toggle_group", UiValue::Array(vec![UiValue::String("a.rs".into())])),
+        ("stage", UiValue::Null),
+        ("unstage", UiValue::Null),
+    ] {
+        invoke(&mut life, "loaded", selection_reply(original.clone(), Some("stale message")))?;
+        invoke(&mut life, action, payload)?;
+        assert_eq!(get("commit"), UiValue::String(String::new()), "{action} must clear text before Git responds");
+        assert_eq!(get("busy"), UiValue::Bool(true));
+        invoke(&mut life, "failed", UiValue::String("simulated staging completion".into()))?;
+    }
+    invoke(&mut life, "loaded", selection_reply(original.clone(), Some("project A message")))?;
+    let other = selection_snapshot("/alloy-test/commit-selection-other", vec![staged]);
+    invoke(&mut life, "loaded", selection_reply(other, None))?;
+    invoke(&mut life, "loaded", selection_reply(changed, None))?;
+    assert_eq!(get("commit"), UiValue::String(String::new()), "project restore must reject a message for an older selection");
+    life.render(&mut engine).map_err(error)?;
     Ok(())
 }
 fn error(e: impl std::fmt::Display) -> String {

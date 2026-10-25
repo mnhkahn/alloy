@@ -1,7 +1,26 @@
 diff --git a/crates/gpui-rhai/src/document_view.rs b/crates/gpui-rhai/src/document_view.rs
-index bd857a0..98ad7d1 100644
+index bd857a0..bf1cbad 100644
 --- a/crates/gpui-rhai/src/document_view.rs
 +++ b/crates/gpui-rhai/src/document_view.rs
+@@ -1,6 +1,6 @@
+ //! Retained native `CodeViewer` and `DiffViewer` surfaces.
+
+-use std::cell::RefCell;
++use std::cell::{Cell, RefCell};
+ use std::collections::{BTreeMap, BTreeSet};
+ use std::ops::Range;
+ use std::rc::Rc;
+@@ -12,8 +12,8 @@ use gpui::{
+     FocusHandle, Focusable, FontWeight, GlobalElementId, HighlightStyle, InspectorElementId,
+     InteractiveElement, IntoElement, KeyBinding, ListHorizontalSizingBehavior, MouseButton,
+     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Render, ScrollHandle,
+-    ScrollStrategy, SharedString, StatefulInteractiveElement, Styled, StyledText, Task, Window,
+-    actions, div, px, relative, rgba, uniform_list,
++    ScrollStrategy, ScrollWheelEvent, SharedString, StatefulInteractiveElement, Styled, StyledText,
++    Task, Window, actions, div, px, relative, rgba, uniform_list,
+ };
+ use regex::RegexBuilder;
+ use similar::TextDiff;
 @@ -23,7 +23,7 @@ use crate::text_input::{
      NativeTypography, TextInputCallbacks, TextInputConfig, TextInputEntity, native_typography,
  };
@@ -11,10 +30,403 @@ index bd857a0..98ad7d1 100644
      DocumentRuntimeConfig, DocumentSource, DocumentWrap, EventSchema, ObjectField, PreparedDiff,
      PreparedDocument, PrimitiveContext, PrimitiveDescriptor, PrimitiveHandler, PrimitiveId,
      PrimitiveInstance, PrimitiveInstanceId, PrimitiveProps, PrimitiveTheme, PrimitiveValue, Style,
-@@ -1911,8 +1911,18 @@ pub fn code_viewer_primitive_descriptor() -> PrimitiveDescriptor {
+@@ -41,6 +41,7 @@ actions!(
+         FindPrevious,
+         CloseFind,
+         CopyDocumentSelection,
++        SelectAllDocument,
+         NextChange,
+         PreviousChange,
+         ExpandAll,
+@@ -50,6 +51,13 @@ actions!(
+     ]
+ );
+
++#[derive(Clone, Debug, PartialEq, gpui::Action)]
++#[action(namespace = gpui_rhai_document, no_json)]
++struct MoveDocumentSelection {
++    direction: String,
++    extend: bool,
++}
++
+ #[derive(Clone, Debug, PartialEq, gpui::Action)]
+ #[action(namespace = gpui_rhai_document, no_json)]
+ pub struct RevealDocumentLine {
+@@ -87,6 +95,39 @@ pub fn init_document_view(cx: &mut App) {
+         KeyBinding::new("shift-cmd-c", CollapseAll, Some(DIFF_CONTEXT)),
+         KeyBinding::new("alt-cmd-c", CopyUnifiedDiff, Some(DIFF_CONTEXT)),
+     ]);
++    for context in [CODE_CONTEXT, DIFF_CONTEXT] {
++        cx.bind_keys([KeyBinding::new("cmd-a", SelectAllDocument, Some(context))]);
++        for (key, direction) in [
++            ("left", "left"),
++            ("right", "right"),
++            ("up", "up"),
++            ("down", "down"),
++            ("alt-left", "word-left"),
++            ("alt-right", "word-right"),
++            ("cmd-left", "line-start"),
++            ("cmd-right", "line-end"),
++            ("home", "document-start"),
++            ("end", "document-end"),
++            ("cmd-up", "document-start"),
++            ("cmd-down", "document-end"),
++        ] {
++            for extend in [false, true] {
++                let key = if extend {
++                    format!("shift-{key}")
++                } else {
++                    key.to_owned()
++                };
++                cx.bind_keys([KeyBinding::new(
++                    &key,
++                    MoveDocumentSelection {
++                        direction: direction.to_owned(),
++                        extend,
++                    },
++                    Some(context),
++                )]);
++            }
++        }
++    }
+ }
+
+ #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+@@ -106,17 +147,28 @@ impl DocumentSide {
      }
  }
- 
+
++#[derive(Clone, Copy, Default)]
++enum SelectionUnit {
++    #[default]
++    Character,
++    Word,
++    Line,
++}
++
+ #[derive(Clone)]
+ struct ActiveDocumentSelection {
+     side: DocumentSide,
+     source: Arc<str>,
+     anchor: usize,
+     head: usize,
++    unit: SelectionUnit,
++    origin: Range<usize>,
+ }
+
+ #[derive(Clone, Default)]
+ struct DocumentSelection {
+     active: Rc<RefCell<Option<ActiveDocumentSelection>>>,
++    dragging: Rc<Cell<bool>>,
+ }
+
+ impl DocumentSelection {
+@@ -126,6 +178,8 @@ impl DocumentSelection {
+             source,
+             anchor: offset,
+             head: offset,
++            unit: SelectionUnit::Character,
++            origin: offset..offset,
+         });
+     }
+
+@@ -136,8 +190,122 @@ impl DocumentSelection {
+             .as_mut()
+             .filter(|selection| selection.side == side)
+         {
+-            selection.head = offset.min(selection.source.len());
++            let range = selection_unit_range(&selection.source, offset, selection.unit);
++            if range.start < selection.origin.start {
++                selection.anchor = selection.origin.end;
++                selection.head = range.start;
++            } else {
++                selection.anchor = selection.origin.start;
++                selection.head = range.end;
++            }
++        }
++    }
++
++    fn click(
++        &self,
++        side: DocumentSide,
++        source: Arc<str>,
++        offset: usize,
++        clicks: usize,
++        shift: bool,
++    ) {
++        self.dragging.set(true);
++        if shift {
++            let mut active = self.active.borrow_mut();
++            if let Some(selection) = active
++                .as_mut()
++                .filter(|s| s.side == side && Arc::ptr_eq(&s.source, &source))
++            {
++                selection.head = clamp_char_boundary(&source, offset);
++                selection.unit = SelectionUnit::Character;
++                selection.origin = selection.anchor..selection.anchor;
++                return;
++            }
++        }
++        self.begin(side, source, offset);
++        let mut active = self.active.borrow_mut();
++        let selection = active.as_mut().unwrap();
++        selection.unit = match clicks {
++            0 | 1 => SelectionUnit::Character,
++            2 => SelectionUnit::Word,
++            _ => SelectionUnit::Line,
++        };
++        let range = selection_unit_range(&selection.source, offset, selection.unit);
++        selection.anchor = range.start;
++        selection.head = range.end;
++        selection.origin = range;
++    }
++
++    fn select_all(&self, side: DocumentSide, source: Arc<str>) {
++        let end = source.len();
++        self.begin(side, source, 0);
++        self.update(side, end);
++    }
++
++    fn move_head(&self, direction: &str, extend: bool) {
++        let mut active = self.active.borrow_mut();
++        let Some(selection) = active.as_mut() else {
++            return;
++        };
++        let source = &selection.source;
++        let head = selection.head;
++        let start = source[..head].rfind('\n').map_or(0, |i| i + 1);
++        let end = source[head..].find('\n').map_or(source.len(), |i| head + i);
++        let next = match direction {
++            "left" if !extend && selection.anchor != head => selection.anchor.min(head),
++            "right" if !extend && selection.anchor != head => selection.anchor.max(head),
++            "left" => source[..head]
++                .grapheme_indices(true)
++                .next_back()
++                .map_or(0, |(i, _)| i),
++            "right" => source[head..]
++                .graphemes(true)
++                .next()
++                .map_or(head, |g| head + g.len()),
++            "word-left" => source[..head]
++                .unicode_word_indices()
++                .next_back()
++                .map_or(0, |(i, _)| i),
++            "word-right" => source[head..]
++                .unicode_word_indices()
++                .next()
++                .map_or(source.len(), |(i, w)| head + i + w.len()),
++            "line-start" => start,
++            "line-end" => end,
++            "document-start" => 0,
++            "document-end" => source.len(),
++            "up" | "down" => {
++                let column = source[start..head].graphemes(true).count();
++                let target = if direction == "up" {
++                    if start == 0 {
++                        0..0
++                    } else {
++                        let previous_end = start - 1;
++                        source[..previous_end].rfind('\n').map_or(0, |i| i + 1)..previous_end
++                    }
++                } else if end == source.len() {
++                    source.len()..source.len()
++                } else {
++                    let next_start = end + 1;
++                    next_start
++                        ..source[next_start..]
++                            .find('\n')
++                            .map_or(source.len(), |i| next_start + i)
++                };
++                target.start
++                    + source[target.clone()]
++                        .grapheme_indices(true)
++                        .nth(column)
++                        .map_or(target.len(), |(i, _)| i)
++            }
++            _ => head,
++        };
++        selection.head = next;
++        if !extend {
++            selection.anchor = next;
+         }
++        selection.unit = SelectionUnit::Character;
++        selection.origin = selection.anchor..selection.anchor;
+     }
+
+     fn range_for(
+@@ -180,6 +348,7 @@ impl DocumentSelection {
+     }
+
+     fn clear(&self) {
++        self.dragging.set(false);
+         self.active.borrow_mut().take();
+     }
+
+@@ -193,10 +362,38 @@ impl DocumentSelection {
+         };
+         selection.anchor = clamp_char_boundary(&next, selection.anchor);
+         selection.head = clamp_char_boundary(&next, selection.head);
++        selection.origin = clamp_char_boundary(&next, selection.origin.start)
++            ..clamp_char_boundary(&next, selection.origin.end);
+         selection.source = next;
+     }
+ }
+
++// Source byte ranges, independent of rendered tabs, wrapping and diff prefixes.
++fn selection_unit_range(source: &str, offset: usize, unit: SelectionUnit) -> Range<usize> {
++    let offset = clamp_char_boundary(source, offset);
++    match unit {
++        SelectionUnit::Character => offset..offset,
++        SelectionUnit::Line => {
++            let start = source[..offset].rfind('\n').map_or(0, |i| i + 1);
++            let end = source[offset..]
++                .find('\n')
++                .map_or(source.len(), |i| offset + i + 1);
++            start..end
++        }
++        SelectionUnit::Word => {
++            let probe = if offset == source.len() {
++                source.char_indices().next_back().map_or(0, |(i, _)| i)
++            } else {
++                offset
++            };
++            source
++                .split_word_bound_indices()
++                .find(|(start, text)| *start <= probe && probe < *start + text.len())
++                .map_or(offset..offset, |(start, text)| start..start + text.len())
++        }
++    }
++}
++
+ #[derive(Clone, Debug, PartialEq)]
+ struct CodeViewerConfig {
+     descriptor: DocumentDescriptor,
+@@ -712,6 +909,47 @@ impl CodeViewerEntity {
+         }
+     }
+
++    fn select_all(&mut self, _: &SelectAllDocument, _: &mut Window, cx: &mut Context<Self>) {
++        if self.loading {
++            return;
++        }
++        let Some(document) = self.prepared.as_ref() else {
++            return;
++        };
++        let (side, source) = (DocumentSide::Single, document.text_arc());
++        self.selection.select_all(side, source);
++        cx.stop_propagation();
++        cx.notify();
++    }
++
++    fn move_selection(
++        &mut self,
++        action: &MoveDocumentSelection,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) {
++        if self.loading {
++            return;
++        }
++        let Some(document) = self.prepared.as_ref() else {
++            return;
++        };
++        let (side, source) = (DocumentSide::Single, document.text_arc());
++        if self.selection.position().is_none() {
++            self.selection.begin(side, source, 0);
++        }
++        self.selection.move_head(&action.direction, action.extend);
++        let Some((side, source, offset)) = self.selection.position() else {
++            return;
++        };
++        let line = source[..offset].bytes().filter(|b| *b == b'\n').count() + 1;
++        let _ = side;
++        let side = None;
++        self.reveal_line(&RevealDocumentLine { side, line }, window, cx);
++        cx.stop_propagation();
++        cx.notify();
++    }
++
+     fn copy_selection(
+         &mut self,
+         _: &CopyDocumentSelection,
+@@ -968,6 +1206,8 @@ impl Render for CodeViewerEntity {
+             .on_action(cx.listener(Self::find_previous))
+             .on_action(cx.listener(Self::close_find))
+             .on_action(cx.listener(Self::copy_selection))
++            .on_action(cx.listener(Self::select_all))
++            .on_action(cx.listener(Self::move_selection))
+             .on_action(cx.listener(Self::reveal_line))
+             .on_action(cx.listener(Self::activate_location))
+             .child(self.content(cx))
+@@ -1224,6 +1464,26 @@ fn code_line_element(
+         theme,
+         theme.direction(),
+     );
++    let gutter = gutter.when(!disabled, |gutter| {
++        let selection = selection.clone();
++        let source = document.text_arc();
++        let focus = focus.clone();
++        let offset = segment.range.start;
++        gutter
++            .cursor_pointer()
++            .on_mouse_down(MouseButton::Left, move |event, window, cx| {
++                focus.focus(window, cx);
++                selection.click(
++                    DocumentSide::Single,
++                    Arc::clone(&source),
++                    offset,
++                    3,
++                    event.modifiers.shift,
++                );
++                cx.stop_propagation();
++                window.refresh();
++            })
++    });
+     let content = crate::renderer::apply_style_override(
+         div()
+             .h_full()
+@@ -1352,8 +1612,15 @@ impl Element for InteractiveDocumentText {
+                 let display = clamp(layout.index_for_position(event.position));
+                 let local = display_source_offset(&offset_map, display).min(range.len());
+                 let global = range.start + local;
+-                selection.begin(side, Arc::clone(&source), global);
+-                if event.click_count >= 2 {
++                selection.click(
++                    side,
++                    Arc::clone(&source),
++                    global,
++                    event.click_count as usize,
++                    event.modifiers.shift,
++                );
++                // Command-click explicitly activates a location; ordinary multi-clicks select text.
++                if event.modifiers.platform {
+                     let mut payload = BTreeMap::from([
+                         (
+                             "line".to_owned(),
+@@ -1390,6 +1657,7 @@ impl Element for InteractiveDocumentText {
+             window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+                 if phase.bubble()
+                     && event.pressed_button == Some(MouseButton::Left)
++                    && selection.dragging.get()
+                     && hitbox.is_hovered(window)
+                 {
+                     let display = clamp(layout.index_for_position(event.position));
+@@ -1402,7 +1670,11 @@ impl Element for InteractiveDocumentText {
+         }
+         {
+             let hitbox = hitbox.clone();
++            let selection = self.selection.clone();
+             window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
++                if phase.bubble() && event.button == MouseButton::Left {
++                    selection.dragging.set(false);
++                }
+                 if phase.bubble() && event.button == MouseButton::Left && hitbox.is_hovered(window)
+                 {
+                     cx.stop_propagation();
+@@ -1911,8 +2183,18 @@ pub fn code_viewer_primitive_descriptor() -> PrimitiveDescriptor {
+     }
+ }
+
 +#[derive(Clone, Debug, PartialEq)]
 +struct HunkControl {
 +    index: usize,
@@ -30,7 +442,7 @@ index bd857a0..98ad7d1 100644
      left: DocumentDescriptor,
      right: DocumentDescriptor,
      mode: DiffViewMode,
-@@ -2016,8 +2026,7 @@ struct DiffViewerEntity {
+@@ -2016,8 +2298,7 @@ struct DiffViewerEntity {
      document_runtime: DocumentRuntimeConfig,
      focus: FocusHandle,
      scroll: gpui::UniformListScrollHandle,
@@ -40,7 +452,7 @@ index bd857a0..98ad7d1 100644
      prepared: Option<Arc<PreparedDiff>>,
      display: Arc<[DiffRenderRow]>,
      display_columns: Option<usize>,
-@@ -2090,8 +2099,7 @@ impl DiffViewerEntity {
+@@ -2090,8 +2371,7 @@ impl DiffViewerEntity {
              document_runtime,
              focus: cx.focus_handle(),
              scroll: gpui::UniformListScrollHandle::new(),
@@ -50,7 +462,66 @@ index bd857a0..98ad7d1 100644
              prepared: None,
              display: Arc::from([]),
              display_columns: None,
-@@ -2864,8 +2872,7 @@ impl DiffViewerEntity {
+@@ -2493,6 +2773,58 @@ impl DiffViewerEntity {
+         }
+     }
+
++    fn select_all(&mut self, _: &SelectAllDocument, _: &mut Window, cx: &mut Context<Self>) {
++        if self.loading {
++            return;
++        }
++        let Some(diff) = self.prepared.as_ref() else {
++            return;
++        };
++        let (side, source) = self
++            .selection
++            .position()
++            .map(|(side, source, _)| (side, source))
++            .unwrap_or((DocumentSide::Right, diff.right.text_arc()));
++        self.selection.select_all(side, source);
++        cx.stop_propagation();
++        cx.notify();
++    }
++
++    fn move_selection(
++        &mut self,
++        action: &MoveDocumentSelection,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) {
++        if self.loading {
++            return;
++        }
++        let Some(diff) = self.prepared.as_ref() else {
++            return;
++        };
++        let (side, source) = self
++            .selection
++            .position()
++            .map(|(side, source, _)| (side, source))
++            .unwrap_or((DocumentSide::Right, diff.right.text_arc()));
++        if self.selection.position().is_none() {
++            self.selection.begin(side, source, 0);
++        }
++        self.selection.move_head(&action.direction, action.extend);
++        let Some((side, source, offset)) = self.selection.position() else {
++            return;
++        };
++        let line = source[..offset].bytes().filter(|b| *b == b'\n').count() + 1;
++        let side = match side {
++            DocumentSide::Left => Some(DiffSide::Left),
++            DocumentSide::Right => Some(DiffSide::Right),
++            DocumentSide::Single => None,
++        };
++        self.reveal_line(&RevealDocumentLine { side, line }, window, cx);
++        cx.stop_propagation();
++        cx.notify();
++    }
++
+     fn copy_selection(
+         &mut self,
+         _: &CopyDocumentSelection,
+@@ -2864,8 +3196,7 @@ impl DiffViewerEntity {
          let events = self.events.clone();
          let focus = self.focus.clone();
          let weak = cx.entity().downgrade();
@@ -60,7 +531,7 @@ index bd857a0..98ad7d1 100644
          let disabled = self.loading;
          let list = uniform_list(
              "gpui-rhai-diff-viewer-lines",
-@@ -2885,8 +2892,8 @@ impl DiffViewerEntity {
+@@ -2885,8 +3216,8 @@ impl DiffViewerEntity {
                              &events,
                              &focus,
                              &weak,
@@ -71,10 +542,143 @@ index bd857a0..98ad7d1 100644
                              disabled,
                          ))
                      })
-@@ -3256,6 +3263,91 @@ fn diff_aligned_for_line(diff: &PreparedDiff, side: DocumentSide, line: usize) -
+@@ -2904,7 +3235,29 @@ impl DiffViewerEntity {
+         .flex_1()
+         .min_h(px(0.0))
+         .opacity(if self.loading { 0.62 } else { 1.0 });
+-        list.into_any_element()
++        // Keep the scroll hit area as tall as the viewport, even for a one-line diff.
++        // Capture horizontal gestures before the per-row scroll containers so an event
++        // moves the shared offset exactly once, on text and on empty space alike.
++        div()
++            .relative()
++            .flex_1()
++            .min_h(px(0.0))
++            .flex()
++            .flex_col()
++            .child(list)
++            .when(
++                matches!(self.config.wrap, DocumentWrap::None)
++                    && self.config.mode == DiffViewMode::Split,
++                |surface| {
++                    let (_, line_height) =
++                        document_text_metrics(&self.config.text_style, &self.theme);
++                    surface.child(DiffHorizontalScrollCapture {
++                        horizontal: self.horizontal.clone(),
++                        line_height: px(line_height.max(16.0)),
++                    })
++                },
++            )
++            .into_any_element()
+     }
+ }
+
+@@ -2977,6 +3330,8 @@ impl Render for DiffViewerEntity {
+             .on_action(cx.listener(Self::find_previous))
+             .on_action(cx.listener(Self::close_find))
+             .on_action(cx.listener(Self::copy_selection))
++            .on_action(cx.listener(Self::select_all))
++            .on_action(cx.listener(Self::move_selection))
+             .on_action(cx.listener(Self::next_change))
+             .on_action(cx.listener(Self::previous_change))
+             .on_action(cx.listener(Self::expand_all))
+@@ -2997,6 +3352,92 @@ impl Render for DiffViewerEntity {
+     }
+ }
+
++/// A non-occluding, viewport-sized hit area for synchronized horizontal scrolling.
++/// The virtual list continues to own vertical scrolling and unified-mode scrolling.
++struct DiffHorizontalScrollCapture {
++    horizontal: ScrollHandle,
++    line_height: Pixels,
++}
++
++impl Element for DiffHorizontalScrollCapture {
++    type RequestLayoutState = AnyElement;
++    type PrepaintState = gpui::Hitbox;
++
++    fn id(&self) -> Option<ElementId> {
++        None
++    }
++
++    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
++        None
++    }
++
++    fn request_layout(
++        &mut self,
++        _: Option<&GlobalElementId>,
++        _: Option<&InspectorElementId>,
++        window: &mut Window,
++        cx: &mut App,
++    ) -> (gpui::LayoutId, Self::RequestLayoutState) {
++        let mut child = div().absolute().inset_0().into_any_element();
++        let layout = child.request_layout(window, cx);
++        (layout, child)
++    }
++
++    fn prepaint(
++        &mut self,
++        _: Option<&GlobalElementId>,
++        _: Option<&InspectorElementId>,
++        bounds: Bounds<Pixels>,
++        child: &mut Self::RequestLayoutState,
++        window: &mut Window,
++        cx: &mut App,
++    ) -> Self::PrepaintState {
++        child.prepaint(window, cx);
++        window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal)
++    }
++
++    fn paint(
++        &mut self,
++        _: Option<&GlobalElementId>,
++        _: Option<&InspectorElementId>,
++        _: Bounds<Pixels>,
++        child: &mut Self::RequestLayoutState,
++        hitbox: &mut Self::PrepaintState,
++        window: &mut Window,
++        cx: &mut App,
++    ) {
++        child.paint(window, cx);
++        let hitbox = hitbox.clone();
++        let horizontal = self.horizontal.clone();
++        let line_height = self.line_height;
++        window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
++            if !phase.capture() || !hitbox.should_handle_scroll(window) {
++                return;
++            }
++            let delta = event.delta.pixel_delta(line_height);
++            if delta.x.abs() <= delta.y.abs() {
++                return;
++            }
++            let mut offset = horizontal.offset();
++            let next = (offset.x + delta.x).clamp(-horizontal.max_offset().x.max(px(0.0)), px(0.0));
++            if next != offset.x {
++                offset.x = next;
++                horizontal.set_offset(offset);
++                window.refresh();
++            }
++            // Do not also deliver this gesture to the row or the vertical list.
++            cx.stop_propagation();
++        });
++    }
++}
++
++impl IntoElement for DiffHorizontalScrollCapture {
++    type Element = Self;
++    fn into_element(self) -> Self::Element {
++        self
++    }
++}
++
+ struct DiffBoundsRecorder {
+     viewer: Entity<DiffViewerEntity>,
+ }
+@@ -3256,6 +3697,91 @@ fn diff_aligned_for_line(diff: &PreparedDiff, side: DocumentSide, line: usize) -
      })
  }
- 
+
 +// Controls share the exact row layout/virtual scroll as the source text.
 +// Coordinates come from the consumer's canonical patch model, not display hunk IDs.
 +fn hunk_control_for_row<'a>(
@@ -163,8 +767,19 @@ index bd857a0..98ad7d1 100644
  #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
  fn diff_line_element(
      diff: &Arc<PreparedDiff>,
-@@ -3348,6 +3440,19 @@ fn diff_line_element(
+@@ -3330,6 +3856,7 @@ fn diff_line_element(
+                 events,
+                 focus,
+                 Some(left_horizontal),
++                diff.left.max_line_chars().max(diff.right.max_line_chars()),
+                 disabled,
+             );
+             let right_cell = diff_cell(
+@@ -3346,8 +3873,22 @@ fn diff_line_element(
+                 events,
+                 focus,
                  Some(right_horizontal),
++                diff.left.max_line_chars().max(diff.right.max_line_chars()),
                  disabled,
              );
 +            let first_segment =
@@ -183,7 +798,7 @@ index bd857a0..98ad7d1 100644
              crate::renderer::apply_style_override(
                  div()
                      .w_full()
-@@ -3363,7 +3468,7 @@ fn diff_line_element(
+@@ -3363,7 +3904,7 @@ fn diff_line_element(
                              .border_color(rgba(
                                  theme_color(theme, "border", 0x353b_48ff).as_rgba_hex(),
                              ))
@@ -192,7 +807,7 @@ index bd857a0..98ad7d1 100644
                      ),
                  &config.line_style,
                  theme,
-@@ -3384,8 +3489,18 @@ fn diff_line_element(
+@@ -3384,8 +3925,18 @@ fn diff_line_element(
              } else {
                  &aligned_row.right_inline
              };
@@ -212,16 +827,59 @@ index bd857a0..98ad7d1 100644
                      if *side == DocumentSide::Left {
                          &diff.left
                      } else {
-@@ -3404,7 +3519,7 @@ fn diff_line_element(
+@@ -3403,8 +3954,9 @@ fn diff_line_element(
+                     events,
                      focus,
                      None,
++                    0,
                      disabled,
 -                )),
 +                ))),
                  &config.line_style,
                  theme,
                  theme.direction(),
-@@ -3771,7 +3886,31 @@ fn parse_diff_config(
+@@ -3429,6 +3981,7 @@ fn diff_cell(
+     events: &PrimitiveContext,
+     focus: &FocusHandle,
+     horizontal: Option<&ScrollHandle>,
++    horizontal_columns: usize,
+     disabled: bool,
+ ) -> AnyElement {
+     let background = match (kind, side) {
+@@ -3605,6 +4158,20 @@ fn diff_cell(
+         theme,
+         theme.direction(),
+     );
++    let gutter = gutter.when(!disabled, |gutter| {
++        let selection = selection.clone();
++        let source = document.text_arc();
++        let focus = focus.clone();
++        let offset = line.range.start;
++        gutter
++            .cursor_pointer()
++            .on_mouse_down(MouseButton::Left, move |event, window, cx| {
++                focus.focus(window, cx);
++                selection.click(side, Arc::clone(&source), offset, 3, event.modifiers.shift);
++                cx.stop_propagation();
++                window.refresh();
++            })
++    });
+     let content = crate::renderer::apply_style_override(
+         div()
+             .h_full()
+@@ -3635,7 +4202,10 @@ fn diff_cell(
+     {
+         let (text_size, _) = document_text_metrics(&config.text_style, theme);
+         let character_width = text_size * 0.604;
+-        let width = (usize_f32(document.max_line_chars()) * character_width + gutter_width + 16.0)
++        let width = (usize_f32(document.max_line_chars().max(horizontal_columns))
++            * character_width
++            + gutter_width
++            + 16.0)
+             .max(80.0);
+         div()
+             .size_full()
+@@ -3771,7 +4341,31 @@ fn parse_diff_config(
          Some("column") => DocumentWrap::Column(props.usize("wrap_column").unwrap_or(100)),
          Some(other) => return Err(format!("unknown DiffViewer wrap mode `{other}`")),
      };
@@ -253,7 +911,7 @@ index bd857a0..98ad7d1 100644
          left: descriptor("left")?,
          right: descriptor("right")?,
          mode,
-@@ -3911,16 +4050,36 @@ pub fn diff_viewer_primitive_descriptor() -> PrimitiveDescriptor {
+@@ -3911,16 +4505,36 @@ pub fn diff_viewer_primitive_descriptor() -> PrimitiveDescriptor {
              ObjectField::optional(ValueSchema::optional(ValueSchema::Callback)),
          ),
      ]);
@@ -296,10 +954,10 @@ index bd857a0..98ad7d1 100644
          state: crate::ComponentStateSchema::default(),
          lifecycle: true,
          effect: None,
-@@ -3931,6 +4090,44 @@ pub fn diff_viewer_primitive_descriptor() -> PrimitiveDescriptor {
+@@ -3931,6 +4545,116 @@ pub fn diff_viewer_primitive_descriptor() -> PrimitiveDescriptor {
  mod tests {
      use super::*;
- 
+
 +    #[test]
 +    fn hunk_controls_anchor_to_consumer_coordinates() {
 +        let controls = vec![HunkControl {
@@ -338,6 +996,78 @@ index bd857a0..98ad7d1 100644
 +        assert!(descriptor.events.contains_key("hunk_action"));
 +    }
 +
++    #[test]
++    fn document_multiclick_selection_and_directional_drag() {
++        let source: Arc<str> = "one two\nthree four\n".into();
++        let selection = DocumentSelection::default();
++        selection.click(DocumentSide::Right, source.clone(), 5, 2, false);
++        assert_eq!(selection.selected_text().as_deref(), Some("two"));
++        selection.update(DocumentSide::Right, 10);
++        assert_eq!(selection.selected_text().as_deref(), Some("two\nthree"));
++        selection.update(DocumentSide::Right, 1);
++        assert_eq!(selection.selected_text().as_deref(), Some("one two"));
++        selection.update(DocumentSide::Right, 6);
++        assert_eq!(selection.selected_text().as_deref(), Some("two"));
++        selection.click(DocumentSide::Right, source.clone(), 10, 3, false);
++        assert_eq!(selection.selected_text().as_deref(), Some("three four\n"));
++        selection.update(DocumentSide::Right, 2);
++        assert_eq!(selection.selected_text().as_deref(), Some(source.as_ref()));
++        selection.click(DocumentSide::Right, source.clone(), 4, 1, false);
++        selection.click(DocumentSide::Right, source.clone(), 11, 1, true);
++        assert_eq!(selection.selected_text().as_deref(), Some("two\nthr"));
++        selection.click(DocumentSide::Left, source, 1, 1, true);
++        assert!(
++            selection.selected_text().is_none(),
++            "shift never spans panes"
++        );
++    }
++
++    #[test]
++    fn document_keyboard_selection_preserves_unicode_and_source_text() {
++        let source: Arc<str> = "e\u{301} 中文\tfoo_bar\r\nlast".into();
++        let selection = DocumentSelection::default();
++        selection.begin(DocumentSide::Right, source.clone(), 0);
++        selection.move_head("right", true);
++        assert_eq!(selection.selected_text().as_deref(), Some("e\u{301}"));
++        selection.move_head("right", false);
++        assert_eq!(selection.position().unwrap().2, "e\u{301}".len());
++        selection.click(
++            DocumentSide::Right,
++            source.clone(),
++            source.find("bar").unwrap(),
++            2,
++            false,
++        );
++        assert_eq!(selection.selected_text().as_deref(), Some("foo_bar"));
++        selection.move_head("word-left", false);
++        assert_eq!(selection.position().unwrap().2, source.find("foo").unwrap());
++        selection.move_head("line-start", false);
++        selection.move_head("down", true);
++        assert_eq!(
++            selection.selected_text().as_deref(),
++            Some("e\u{301} 中文\tfoo_bar\r\n")
++        );
++        selection.select_all(DocumentSide::Right, source.clone());
++        assert_eq!(selection.selected_text().as_deref(), Some(source.as_ref()));
++        selection.select_all(DocumentSide::Right, Arc::from(""));
++        selection.move_head("left", true);
++        selection.move_head("down", true);
++        assert!(selection.selected_text().is_none());
++    }
++
++    #[test]
++    fn document_selection_unit_handles_whitespace_punctuation_and_eof() {
++        assert_eq!(
++            selection_unit_range("hello  world", 6, SelectionUnit::Word),
++            5..7
++        );
++        assert_eq!(selection_unit_range("foo(x)", 3, SelectionUnit::Word), 3..4);
++        assert_eq!(selection_unit_range("hello", 5, SelectionUnit::Word), 0..5);
++        assert_eq!(selection_unit_range("", 0, SelectionUnit::Word), 0..0);
++        assert_eq!(selection_unit_range("a\r\nb", 0, SelectionUnit::Line), 0..3);
++        assert_eq!(selection_unit_range("a\nb", 3, SelectionUnit::Line), 2..3);
++    }
++
      #[test]
      fn document_selection_copies_original_cross_line_text() {
          let source: Arc<str> = Arc::from("one\ntwo\nthree");
@@ -366,7 +1096,7 @@ index 24cabe1..e0da6a2 100644
  fn side_or(side, name, fallback) { if name in side && side[name] != () { side[name] } else { fallback } }
 +fn hunk_action(ctx, payload) { ctx.emit("hunk_action", payload); }
  fn location_activate(ctx, payload) { ctx.emit("location_activate", payload); }
- 
+
  fn render_DiffViewer(ctx, props) {
 @@ -72,6 +76,9 @@ fn render_DiffViewer(ctx, props) {
          .width(relative(1.0)).height(relative(1.0)).min_width(px(0)).min_height(px(0))

@@ -90,7 +90,7 @@ In exact comparison mode, the middle gutter provides `»` (restore the HEAD bloc
 
 Block staging updates a temporary copy of the index under Git’s index lock, then publishes it atomically. Working-tree files and unrelated staged entries are preserved. Refreshes reconstruct block checkbox states from HEAD, index and working-tree contents. Stale selections and staged content not representable by the visible blocks are rejected; use the whole-file checkbox in those cases. Additions, deletions, renames and non-text files use whole-file staging.
 
-`patches/gpui-rhai-hunk-controls.patch` extends the pinned gpui-rhai checkout with opt-in `hunk_controls`, `show_hunk_controls` and `on_hunk_action`. The controls share the native virtualized row layout and emit source-checked callbacks. `patches/gpui-rhai-menu-focus.patch` keeps virtual menu labels from sharing their container’s native focus handle, preventing an accessibility crash when selecting an ACP agent. `scripts/prepare-dependency.sh` applies both patches idempotently and refuses incompatible changes; the packaging script and CI run it automatically. The sibling gpui-rhai checkout therefore contains a small local modification.
+`patches/gpui-rhai-hunk-controls.patch` extends the pinned gpui-rhai checkout with opt-in `hunk_controls`, `show_hunk_controls` and `on_hunk_action`. The controls share the native virtualized row layout and emit source-checked callbacks. `patches/gpui-rhai-menu-focus.patch` keeps virtual menu labels from sharing their container’s native focus handle, preventing an accessibility crash when selecting an ACP agent. The same document patch adds native mouse and keyboard text selection to diff/code viewers. `scripts/prepare-dependency.sh` applies these patches idempotently and refuses incompatible changes; the packaging script and CI run it automatically. The sibling gpui-rhai checkout therefore contains a small local modification.
 
 Toolbar shortcuts (also printed on the buttons): Refresh `⌘⌥Y`, Fetch `⌘⌥F`, Pull `⌘T`, Push `⌘⇧K`, Tag `⌘⌥T`. Pull/Push open the same confirmation from either the button or keyboard; Tag opens the version-selection flow. It uses the highest stable numeric version across local and remote tags and preserves its prefix, including custom prefixes made of ASCII letters, digits, hyphens and underscores (for example `ease-v0.2.1` → `ease-v0.2.2` for s, `ease-v0.3.0` for m, or `ease-v1.0.0` for l). Equal versions prefer a custom prefix, then `v`, `V`, and no prefix; multiple custom prefixes use lexical order to break ties. Fetch and Tag use Alloy-specific bindings. Shortcut labels and bindings share one catalog; `⌘⇧A` lists the actions.
 
@@ -107,3 +107,33 @@ Git network operations use macOS manual HTTP/HTTPS system proxies when no explic
 Diff views hide unchanged sections by default, keeping three context lines around each change. Use **Show all lines / Hide unchanged** in the diff toolbar to toggle the full file; click an “unchanged lines” separator to expand one folded section. This changes only the display, not staging or file contents.
 
 The active repository refreshes automatically from native filesystem events, including worktree files, the Git index, HEAD and refs (also with external Git directories/worktrees). Changes are coalesced before reading Git state; idle ticks only check the event counter. Refresh results are deferred while editing unsaved drafts or confirming an operation, and discarded after switching files/projects or starting another operation. Manual Refresh remains available. This does not automatically fetch from remotes.
+
+### Diff text interactions
+
+Click inside a pane to focus it. Selections and copies use that pane's original text, including tabs and line endings; diff markers and line numbers are excluded. These interactions also work in historical diffs and merge comparison panes.
+
+| Interaction | Behavior |
+| --- | --- |
+| Drag | Select text across lines within one pane |
+| Double-click / double-click and drag | Select a Unicode word / extend by words (including code identifiers such as `foo_bar`) |
+| Triple-click / triple-click and drag | Select a complete source line including its newline / extend by lines |
+| Click a line number | Select the complete source line |
+| Shift-click | Extend the current selection to the clicked position in the same pane |
+| ⌘A / ⌘C | Select the whole active pane (including folded text) / copy selection; before a pane is clicked, ⌘A defaults to the right pane |
+| ← / →, ↑ / ↓ | Move the selection endpoint by character or source line; Shift extends the selection |
+| ⌥← / ⌥→ | Move by word; Shift extends the selection |
+| ⌘← / ⌘→ | Move to source line start/end; Shift extends the selection |
+| ⌘↑ / ⌘↓, Home / End | Move to document start/end; Shift extends the selection |
+| ⌘F | Open search |
+| ⌘G / ⌘⇧G | Next / previous search match |
+| Escape | Close search |
+| ⌥↑ / ⌥↓ | Previous / next change block |
+| ⌘⇧E / ⌘⇧C | Expand / collapse all unchanged sections |
+| ⌘⌥C | Copy a unified diff patch |
+| ⌘-click / Enter | Emit source-location activation for consumers that handle it |
+
+While the diff has focus, ⌥←/→ moves within text; the app's previous/next file shortcut remains available outside the native viewer. Keyboard movement reveals folded target lines. Drag selection currently requires the pointer to remain over rendered text; dragging beyond the viewport does not auto-scroll. Rectangular and multiple disjoint selections are not implemented.
+
+In split diffs, horizontal gestures work across the full content viewport, including blank space below short files. Both panes share the horizontal offset and use the wider document for their scroll range. Vertical scrolling remains owned by the virtual list.
+
+The Commit message is cleared as soon as file/group/block staging is changed. Refresh and filesystem updates also clear it when the staged file selection changes; browsing diffs and changing the filename filter preserve it. Returning to a project restores its message only if its staged selection still matches the saved session. Merge messages retain their existing edit workflow.
