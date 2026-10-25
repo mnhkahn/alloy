@@ -6,6 +6,7 @@ pub mod history;
 mod git_proxy;
 pub mod llm;
 pub mod preview;
+pub mod preferences;
 pub mod projects;
 pub mod tag;
 pub mod watch;

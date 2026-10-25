@@ -30,7 +30,10 @@ impl ScriptViewExtension for GitExtension {
                     ("set_enabled".into(), CapabilityMethod { input: ValueSchema::UiValue, output: ValueSchema::UiValue }),
                 ]),
             },
-            AwakeCapabilities(alloy::awake::Monitor::new(self.fixture.is_none())),
+            AwakeCapabilities::new(
+                self.fixture.is_none(),
+                if self.fixture.is_none() { Some(alloy::preferences::store_path()?) } else { None },
+            )?,
         ).map_err(|e| e.to_string())?;
         runtime.capabilities.register(
             CapabilityDescriptor {
@@ -569,18 +572,71 @@ fn from_ui(value: UiValue) -> Value {
 }
 
 struct Boot(Value);
-struct AwakeCapabilities(alloy::awake::Monitor);
+struct AwakeCapabilities {
+    monitor: alloy::awake::Monitor,
+    preferences_path: Option<std::path::PathBuf>,
+}
+impl AwakeCapabilities {
+    fn new(live: bool, preferences_path: Option<std::path::PathBuf>) -> Result<Self, String> {
+        let enabled = match &preferences_path {
+            Some(path) => alloy::preferences::Preferences::read(path)?.keep_awake,
+            None => false,
+        };
+        let monitor = alloy::awake::Monitor::new(live);
+        monitor.set_enabled(enabled);
+        Ok(Self { monitor, preferences_path })
+    }
+}
 impl CapabilityHandler for AwakeCapabilities {
     fn call(&mut self, method: &str, input: UiValue) -> Result<UiValue, String> {
         let status = match method {
-            "status" => self.0.status(),
+            "status" => self.monitor.status(),
             "set_enabled" => match input {
-                UiValue::Bool(enabled) => self.0.set_enabled(enabled),
+                UiValue::Bool(enabled) => {
+                    if let Some(path) = &self.preferences_path {
+                        let mut preferences = alloy::preferences::Preferences::read(path)?;
+                        preferences.keep_awake = enabled;
+                        preferences.save(path).map_err(|e| format!("无法保存保持唤醒设置：{e}"))?;
+                    }
+                    self.monitor.set_enabled(enabled)
+                },
                 _ => return Err("Expected keep-awake checkbox value".into()),
             },
             _ => return Err("Unknown keep-awake method".into()),
         };
         Ok(to_ui(serde_json::to_value(status).map_err(|e| e.to_string())?))
+    }
+}
+
+#[cfg(test)]
+mod awake_preferences_tests {
+    use super::*;
+
+    #[test]
+    fn restores_both_checkbox_states_across_restarts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings/preferences.json");
+        for enabled in [true, false] {
+            let mut awake = AwakeCapabilities::new(false, Some(path.clone())).unwrap();
+            assert_eq!(awake.monitor.status().enabled, !enabled);
+            awake.call("set_enabled", UiValue::Bool(enabled)).unwrap();
+            drop(awake);
+            let restored = AwakeCapabilities::new(false, Some(path.clone())).unwrap();
+            assert_eq!(restored.monitor.status().enabled, enabled);
+            assert!(!restored.monitor.status().active);
+        }
+        // UI fixtures stay isolated from user preferences.
+        assert!(!AwakeCapabilities::new(false, None).unwrap().monitor.status().enabled);
+    }
+
+    #[test]
+    fn failed_save_does_not_change_checkbox_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings/preferences.json");
+        let mut awake = AwakeCapabilities::new(false, Some(path.clone())).unwrap();
+        std::fs::write(path.parent().unwrap(), "blocks directory creation").unwrap();
+        assert!(awake.call("set_enabled", UiValue::Bool(true)).is_err());
+        assert!(!awake.monitor.status().enabled);
     }
 }
 impl CapabilityHandler for Boot {
