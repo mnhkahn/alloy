@@ -19,6 +19,44 @@ static BOOL blocked = YES;
 static BOOL checkingFeed = NO;
 static void (^pendingInstall)(void);
 
+int alloy_updater_check(void);
+int alloy_updater_can_check(void);
+
+@interface AlloyUpdaterMenuTarget : NSObject <NSMenuItemValidation>
+@end
+@implementation AlloyUpdaterMenuTarget
+- (void)checkForUpdates:(id)sender {
+    alloy_updater_check();
+}
+- (BOOL)validateMenuItem:(NSMenuItem *)item {
+    return !blocked && alloy_updater_can_check();
+}
+@end
+
+static void install_update_menu(void) {
+    static AlloyUpdaterMenuTarget *target;
+    if (target) return;
+    target = [AlloyUpdaterMenuTarget new];
+    NSMenu *main = NSApp.mainMenu;
+    if (!main) {
+        main = [[NSMenu alloc] initWithTitle:@""];
+        NSApp.mainMenu = main;
+    }
+    NSMenu *application = main.numberOfItems ? [main itemAtIndex:0].submenu : nil;
+    if (!application) {
+        NSMenuItem *root = [[NSMenuItem alloc] initWithTitle:@"Alloy" action:nil keyEquivalent:@""];
+        application = [[NSMenu alloc] initWithTitle:@"Alloy"];
+        root.submenu = application;
+        [main insertItem:root atIndex:0];
+    }
+    NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:@"检查更新…" action:@selector(checkForUpdates:) keyEquivalent:@""];
+    item.target = target;
+    // Keep the updater in the application menu even in development builds,
+    // where validation disables it because Sparkle is unavailable.
+    [application insertItem:item atIndex:0];
+    [application insertItem:[NSMenuItem separatorItem] atIndex:1];
+}
+
 @interface AlloyUpdaterDelegate : NSObject
 @end
 @implementation AlloyUpdaterDelegate
@@ -32,6 +70,7 @@ static void (^pendingInstall)(void);
 int alloy_updater_start(void) {
     @autoreleasepool {
         if (![NSThread isMainThread]) return 0;
+        install_update_menu();
         if (controller) return 1;
         NSBundle *app = [NSBundle mainBundle];
         if (![app objectForInfoDictionaryKey:@"SUPublicEDKey"] || ![app objectForInfoDictionaryKey:@"SUFeedURL"]) return 0;
