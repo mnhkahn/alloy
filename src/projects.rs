@@ -190,7 +190,7 @@ impl Projects {
             .iter()
             .map(|m| {
                 serde_json::json!({
-                    "name":m.name,"base_url":m.base_url,"model":m.model,"max_tokens":m.max_tokens,
+                    "protocol":m.protocol,"name":m.name,"base_url":m.base_url,"model":m.model,"max_tokens":m.max_tokens,
                     "has_api_key":m.api_key.as_ref().is_some_and(|k| !k.is_empty())
                 })
             })
@@ -259,6 +259,7 @@ mod tests {
         assert!(legacy.direct_models.is_empty());
         assert!(legacy.selected_model.is_empty());
         let model = crate::llm::ModelConfig {
+            protocol: crate::llm::Protocol::default(),
             name: " Direct ".into(),
             base_url: " https://example.test/v1/ ".into(),
             model: " test-model ".into(),

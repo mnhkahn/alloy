@@ -27,7 +27,7 @@ fn state_schema() { #{ fields: #{
     acp_agents: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
     direct_models: #{schema:#{type:"ui_value"}, "default":#{type:"null"}},
     selected_model: string_field(""), registration_type: string_field("acp"),
-    model_base_url: string_field(""), model_id: string_field(""), model_api_key: string_field(""),
+    model_protocol: string_field("openai_chat"), model_protocol_open: bool_field(false), model_base_url: string_field(""), model_id: string_field(""), model_api_key: string_field(""),
     selected_acp: string_field("Xiaoli"), acp_new_name: string_field(""), acp_new_command: string_field(""), acp_clear_new_fields: bool_field(false), acp_message: string_field(""),
     projects: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
     project_sessions: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
@@ -385,6 +385,8 @@ fn acp_add_agent(ctx,payload) {
     save_acp_settings(ctx,agents,name,true);
 }
 fn registration_type_change(ctx,value) {ctx.set_state("registration_type",value);ctx.set_state("model_api_key","");}
+fn model_protocol_change(ctx,value) {ctx.set_state("model_protocol",value);ctx.set_state("model_protocol_open",false);}
+fn model_protocol_open(ctx,value) {ctx.set_state("model_protocol_open",value);}
 fn model_base_url_change(ctx,value) {ctx.set_state("model_base_url",value);}
 fn model_id_change(ctx,value) {ctx.set_state("model_id",value);}
 fn model_api_key_change(ctx,value) {ctx.set_state("model_api_key",value);}
@@ -400,14 +402,14 @@ fn model_register(ctx,payload) {
     let base=ctx.get_state("model_base_url");base.trim();let model=ctx.get_state("model_id");model.trim();
     if name=="" || base=="" || model=="" {acp_status(ctx,"请填写名称、Base URL 和模型名。");return;}
     ctx.set_state("acp_clear_new_fields",true);
-    model_settings_request(ctx,"register_model",#{model:#{name:name,base_url:base,model:model,api_key:ctx.get_state("model_api_key"),max_tokens:4096}});
+    model_settings_request(ctx,"register_model",#{model:#{protocol:ctx.get_state("model_protocol"),name:name,base_url:base,model:model,api_key:ctx.get_state("model_api_key"),max_tokens:4096}});
 }
 fn model_choose(ctx,name) {model_settings_request(ctx,"select_model",#{name:name});}
 fn model_remove(ctx,name) {model_settings_request(ctx,"remove_model",#{name:name});}
 fn model_edit(ctx,name) {
     for model in direct_model_list(ctx) {if model.name==name {
         ctx.set_state("registration_type","model");ctx.set_state("acp_new_name",name);
-        ctx.set_state("model_base_url",model.base_url);ctx.set_state("model_id",model.model);ctx.set_state("model_api_key","");
+        ctx.set_state("model_protocol",model.protocol);ctx.set_state("model_base_url",model.base_url);ctx.set_state("model_id",model.model);ctx.set_state("model_api_key","");
         acp_status(ctx,"编辑后点注册 / 更新。API Key 留空保留已有密钥。");return;
     }}
 }
@@ -904,10 +906,11 @@ fn acp_config_page(ctx) {
         ]).with_key(`direct-model-${model.name}`).with_style(style().padding(px(8)).gap(px(8)).items_center().background(theme_color("surface_raised"))));
     }
     let fields=if ctx.get_state("registration_type")=="model" {[
+        select::Select(#{key:"model-protocol",label:"模型协议",options:[#{value:"openai_chat",label:"OpenAI Chat Completions"},#{value:"openai_responses",label:"OpenAI Responses"},#{value:"anthropic",label:"Anthropic Messages"}],value:ctx.get_state("model_protocol"),open:ctx.get_state("model_protocol_open"),query:"",empty_text:"No protocols",on_change:Fn("model_protocol_change"),on_open_change:Fn("model_protocol_open"),disabled:ctx.get_state("busy")}),
         input::Input(#{key:"model-base-url",label:"Base URL",value:ctx.get_state("model_base_url"),placeholder:"https://api.example.com/v1",on_change:Fn("model_base_url_change"),disabled:ctx.get_state("busy")}),
         input::Input(#{key:"model-id",label:"模型名",value:ctx.get_state("model_id"),placeholder:"服务商提供的模型 ID",on_change:Fn("model_id_change"),disabled:ctx.get_state("busy")}),
         input::Input(#{key:"model-api-key",label:"API Key（可选）",value:ctx.get_state("model_api_key"),placeholder:"新建可留空；更新时留空保留已有密钥",on_change:Fn("model_api_key_change"),disabled:ctx.get_state("busy")}),
-        small("支持 OpenAI 兼容的 Chat Completions 接口。Base URL 填到 /v1，或填写完整 /chat/completions 地址。")
+        small("选择服务支持的协议。Base URL 可填服务根地址、/v1 地址或对应协议的完整接口地址。")
     ]} else {[
         input::Input(#{key:"acp-agent-command",label:"命令字符串",value:ctx.get_state("acp_new_command"),placeholder:"opencode acp",on_change:Fn("acp_new_command_change"),on_submit:Fn("acp_add_agent"),disabled:ctx.get_state("busy")}),
         small("命令支持参数及引号，例如 opencode acp。")
