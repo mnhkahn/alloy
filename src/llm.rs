@@ -1,12 +1,23 @@
-//! OpenAI-compatible generation for models registered through Alloy's UI.
+//! Multi-protocol generation for models registered through Alloy's UI.
 use serde::{Deserialize, Serialize};
 use std::{path::Path, time::Duration};
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 const RETRIES: usize = 2;
 
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Protocol {
+    #[default]
+    OpenaiChat,
+    OpenaiResponses,
+    Anthropic,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
+    #[serde(default)]
+    pub protocol: Protocol,
     pub name: String,
     pub base_url: String,
     pub model: String,
@@ -75,13 +86,74 @@ fn generate_using(
     }
 }
 
-pub(crate) fn endpoint(base_url: &str) -> String {
+fn endpoint(base_url: &str, protocol: Protocol) -> String {
     let trimmed = base_url.trim_end_matches('/');
-    if trimmed.ends_with("/chat/completions") {
-        trimmed.to_string()
-    } else {
-        format!("{trimmed}/chat/completions")
+    let suffix = match protocol {
+        Protocol::OpenaiChat => "/chat/completions",
+        Protocol::OpenaiResponses => "/responses",
+        Protocol::Anthropic => "/messages",
+    };
+    if trimmed.ends_with(suffix) {
+        return trimmed.to_owned();
     }
+    // Accept both a server root and an API base ending in /v1.
+    let url = reqwest::Url::parse(trimmed).ok();
+    let version = if url
+        .as_ref()
+        .is_some_and(|u| u.path().is_empty() || u.path() == "/")
+    {
+        "/v1"
+    } else {
+        ""
+    };
+    format!("{trimmed}{version}{suffix}")
+}
+
+fn request_body(config: &ModelConfig, system: &str, user: &str) -> serde_json::Value {
+    match config.protocol {
+        Protocol::OpenaiChat => serde_json::json!({
+            "model":config.model,"temperature":0.2,"max_tokens":config.max_tokens,
+            "stream":false,"messages":[{"role":"system","content":system},{"role":"user","content":user}]
+        }),
+        Protocol::OpenaiResponses => serde_json::json!({
+            "model":config.model,"max_output_tokens":config.max_tokens,"stream":false,
+            "instructions":system,"input":user
+        }),
+        Protocol::Anthropic => serde_json::json!({
+            "model":config.model,"max_tokens":config.max_tokens,"stream":false,
+            "system":system,"messages":[{"role":"user","content":user}]
+        }),
+    }
+}
+
+fn response_text(payload: &serde_json::Value, protocol: Protocol) -> String {
+    match protocol {
+        Protocol::OpenaiChat => payload
+            .pointer("/choices/0/message/content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned(),
+        Protocol::Anthropic => payload["content"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|b| b["type"] == "text")
+            .filter_map(|b| b["text"].as_str())
+            .collect::<Vec<_>>()
+            .join(""),
+        Protocol::OpenaiResponses => payload["output"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|item| item["type"] == "message")
+            .flat_map(|item| item["content"].as_array().into_iter().flatten())
+            .filter(|b| b["type"] == "output_text")
+            .filter_map(|b| b["text"].as_str())
+            .collect::<Vec<_>>()
+            .join(""),
+    }
+    .trim()
+    .to_owned()
 }
 
 /// Single non-streaming generation: 60s per request, up to 2 retries with
@@ -92,23 +164,23 @@ pub fn generate(config: &ModelConfig, system: &str, user: &str) -> Result<String
         .timeout(TIMEOUT)
         .build()
         .map_err(|e| e.to_string())?;
-    let body = serde_json::json!({
-        "model": config.model,
-        "temperature": 0.2,
-        "max_tokens": config.max_tokens,
-        "stream": false,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-    });
+    let body = request_body(config, system, user);
     let mut attempt = 0;
     loop {
-        let mut request = client.post(endpoint(&config.base_url)).json(&body);
-        if let Some(key) = &config.api_key {
-            request = request.bearer_auth(key);
+        let mut request = client
+            .post(endpoint(&config.base_url, config.protocol))
+            .json(&body);
+        if config.protocol == Protocol::Anthropic {
+            request = request.header("anthropic-version", "2023-06-01");
         }
-        match send(request) {
+        if let Some(key) = &config.api_key {
+            request = if config.protocol == Protocol::Anthropic {
+                request.header("x-api-key", key)
+            } else {
+                request.bearer_auth(key)
+            };
+        }
+        match send(request, config.protocol) {
             Ok(text) => return Ok(text),
             Err((retryable, error)) => {
                 if !retryable || attempt >= RETRIES {
@@ -121,7 +193,10 @@ pub fn generate(config: &ModelConfig, system: &str, user: &str) -> Result<String
     }
 }
 
-fn send(request: reqwest::blocking::RequestBuilder) -> Result<String, (bool, String)> {
+fn send(
+    request: reqwest::blocking::RequestBuilder,
+    protocol: Protocol,
+) -> Result<String, (bool, String)> {
     let response = request.send().map_err(|e| {
         let retryable = e.is_timeout() || e.is_connect() || e.status().is_none();
         (retryable, format!("Model request failed: {e}"))
@@ -138,12 +213,7 @@ fn send(request: reqwest::blocking::RequestBuilder) -> Result<String, (bool, Str
     let payload: serde_json::Value = response
         .json()
         .map_err(|e| (false, format!("Cannot parse model response: {e}")))?;
-    let text = payload
-        .pointer("/choices/0/message/content")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_string();
+    let text = response_text(&payload, protocol);
     if text.is_empty() {
         return Err((true, "Model returned an empty response.".into()));
     }
@@ -160,6 +230,16 @@ mod tests {
 
     #[test]
     fn direct_selection_sends_registered_endpoint_model_key_and_messages() {
+        for protocol in [
+            Protocol::OpenaiChat,
+            Protocol::OpenaiResponses,
+            Protocol::Anthropic,
+        ] {
+            check_direct_request(protocol);
+        }
+    }
+
+    fn check_direct_request(protocol: Protocol) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}/v1/", listener.local_addr().unwrap());
         let server = std::thread::spawn(move || {
@@ -190,13 +270,24 @@ mod tests {
                 assert!(n > 0);
                 bytes.extend_from_slice(&buf[..n]);
             }
-            let response = r#"{"choices":[{"message":{"content":"feat: 恢复直连模型"}}]}"#;
+            let response = match protocol {
+                Protocol::OpenaiChat => {
+                    r#"{"choices":[{"message":{"content":"feat: 恢复直连模型"}}]}"#
+                }
+                Protocol::OpenaiResponses => {
+                    r#"{"output":[{"type":"message","content":[{"type":"output_text","text":"feat: 恢复直连模型"}]}]}"#
+                }
+                Protocol::Anthropic => {
+                    r#"{"content":[{"type":"text","text":"feat: 恢复直连模型"}]}"#
+                }
+            };
             write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", response.len(), response).unwrap();
             bytes
         });
         let mut settings = crate::projects::Projects::default();
         settings
             .register_model(ModelConfig {
+                protocol,
                 name: "local mock".into(),
                 base_url: base,
                 model: "test-model".into(),
@@ -211,28 +302,93 @@ mod tests {
         );
         let bytes = server.join().unwrap();
         let request = String::from_utf8(bytes).unwrap();
-        assert!(request.starts_with("POST /v1/chat/completions HTTP/1.1"));
-        assert!(
-            request
-                .to_lowercase()
-                .contains("authorization: bearer test-key")
-        );
+        let path = match protocol {
+            Protocol::OpenaiChat => "chat/completions",
+            Protocol::OpenaiResponses => "responses",
+            Protocol::Anthropic => "messages",
+        };
+        assert!(request.starts_with(&format!("POST /v1/{path} HTTP/1.1")));
+        let headers = request.to_lowercase();
+        if protocol == Protocol::Anthropic {
+            assert!(headers.contains("x-api-key: test-key"));
+            assert!(headers.contains("anthropic-version: 2023-06-01"));
+            assert!(!headers.contains("authorization:"));
+        } else {
+            assert!(headers.contains("authorization: bearer test-key"));
+        }
         let body: serde_json::Value =
             serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
         assert_eq!(body["model"], "test-model");
-        assert_eq!(body["messages"][0]["content"], "system prompt");
-        assert_eq!(body["messages"][1]["content"], "staged diff");
+        assert_eq!(
+            body,
+            request_body(&settings.direct_models[0], "system prompt", "staged diff")
+        );
         assert_eq!(body["stream"], false);
+    }
+
+    #[test]
+    fn protocols_use_distinct_wire_formats() {
+        for (protocol, path, payload, expected) in [
+            (
+                Protocol::OpenaiResponses,
+                "responses",
+                serde_json::json!({"output":[{"type":"reasoning"},{"type":"message","content":[{"type":"output_text","text":"hello"}]}]}),
+                "hello",
+            ),
+            (
+                Protocol::Anthropic,
+                "messages",
+                serde_json::json!({"content":[{"type":"thinking","thinking":"private"},{"type":"text","text":"hello"}]}),
+                "hello",
+            ),
+        ] {
+            for base in ["http://localhost:8790", "http://localhost:8790/v1/"] {
+                assert_eq!(
+                    endpoint(base, protocol),
+                    format!("http://localhost:8790/v1/{path}")
+                );
+            }
+            let full = format!("http://localhost:8790/v1/{path}");
+            assert_eq!(endpoint(&full, protocol), full);
+            assert_eq!(response_text(&payload, protocol), expected);
+            let config = ModelConfig {
+                protocol,
+                name: "test".into(),
+                base_url: full,
+                model: "test".into(),
+                api_key: None,
+                max_tokens: 128,
+            };
+            let body = request_body(&config, "system", "user");
+            if protocol == Protocol::Anthropic {
+                assert_eq!(body["system"], "system");
+                assert_eq!(body["messages"][0]["content"], "user");
+                assert_eq!(body["max_tokens"], 128);
+            } else {
+                assert_eq!(body["instructions"], "system");
+                assert_eq!(body["input"], "user");
+                assert_eq!(body["max_output_tokens"], 128);
+                assert!(body.get("max_tokens").is_none());
+            }
+        }
+        let config: ModelConfig = serde_json::from_value(serde_json::json!({
+            "name":"old","base_url":"http://localhost/v1","model":"test"
+        }))
+        .unwrap();
+        assert_eq!(config.protocol, Protocol::OpenaiChat);
     }
 
     #[test]
     fn endpoints_and_invalid_registration() {
         assert_eq!(
-            endpoint("https://example.test/v1/"),
+            endpoint("https://example.test/v1/", Protocol::OpenaiChat),
             "https://example.test/v1/chat/completions"
         );
         assert_eq!(
-            endpoint("https://example.test/v1/chat/completions"),
+            endpoint(
+                "https://example.test/v1/chat/completions",
+                Protocol::OpenaiChat
+            ),
             "https://example.test/v1/chat/completions"
         );
         for url in [
@@ -242,6 +398,7 @@ mod tests {
             "https://example.test?api_key=secret",
         ] {
             let mut model = ModelConfig {
+                protocol: Protocol::default(),
                 name: "test".into(),
                 base_url: url.into(),
                 model: "m".into(),

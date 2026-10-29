@@ -181,7 +181,7 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
     let original_model = get("selected_model");
     let saved = crate::bridge::to_ui(serde_json::json!({
         "ok":true,"acp_agents":[],"selected_acp":"Xiaoli","selected_model":"Local model",
-        "direct_models":[{"name":"Local model","base_url":"http://localhost:8000/v1","model":"test-model","has_api_key":true,"max_tokens":4096}]
+        "direct_models":[{"protocol":"openai_chat","name":"Local model","base_url":"http://localhost:8000/v1","model":"test-model","has_api_key":true,"max_tokens":4096}]
     }));
     let callback = engine.callback(&compiled, "acp_settings_saved").map_err(error)?;
     let _ = life.invoke_callback_transactional(&engine, &callback, saved).map_err(error)?;
@@ -193,6 +193,7 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
     assert!(find_node(tree,"model-base-url").is_some());
     assert!(find_node(tree,"model-api-key").is_some());
     assert_eq!(get("model_id"),UiValue::String("test-model".into()));
+    assert_eq!(get("model_protocol"),UiValue::String("openai_chat".into()));
     assert_eq!(get("model_api_key"),UiValue::String(String::new()));
     let key_change = engine.callback(&compiled, "model_api_key_change").map_err(error)?;
     let _ = life.invoke_callback_transactional(&engine, &key_change, UiValue::String("unsaved-key".into())).map_err(error)?;

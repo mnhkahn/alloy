@@ -137,3 +137,9 @@ While the diff has focus, ⌥←/→ moves within text; the app's previous/next 
 In split diffs, horizontal gestures work across the full content viewport, including blank space below short files. Both panes share the horizontal offset and use the wider document for their scroll range. Vertical scrolling remains owned by the virtual list.
 
 The Commit message is cleared as soon as file/group/block staging is changed. Refresh and filesystem updates also clear it when the staged file selection changes; browsing diffs and changing the filename filter preserve it. Returning to a project restores its message only if its staged selection still matches the saved session. Merge messages retain their existing edit workflow.
+
+### Direct model protocols
+
+Model registration includes a protocol selector: OpenAI Chat Completions (the default for existing configurations), OpenAI Responses, or Anthropic Messages. Both a server root such as `http://127.0.0.1:8790` and an API base such as `http://127.0.0.1:8790/v1` are accepted; server roots receive `/v1` automatically. Full endpoints are also accepted. Custom API prefixes are preserved.
+
+For the local 8790 service, choose Anthropic Messages or OpenAI Responses. Editing a saved model restores its protocol; an empty API Key preserves the saved key.
