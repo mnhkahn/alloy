@@ -78,6 +78,27 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
     // Reproduce an AI result while the user already has a changed file open.
     // Reloading that selection would clear the pending confirmation on success.
     let state = |field: &str| runtime.borrow().component_state.get(&state_path, field).cloned().unwrap();
+    if exercise_large_project {
+        let saved_busy=state("busy");
+        let saved_confirm=state("confirm");
+        runtime.borrow_mut().component_state.set(&state_path,"busy",UiValue::Bool(true)).map_err(error)?;
+        let closing=engine.callback(&compiled,"closing").map_err(error)?;
+        let _=life.invoke_callback_transactional(&engine,&closing,UiValue::Null).map_err(error)?;
+        let tree=life.render(&mut engine).map_err(error)?;
+        for key in ["confirmation-confirm","confirmation-cancel"] {
+            assert_eq!(node_with_key(tree,key).unwrap().attributes().get("disabled"),Some(&UiValue::Bool(false)),"closing must remain possible during an in-flight operation");
+        }
+        let cancel=node_with_key(tree,"confirmation-cancel").unwrap().handler("click").and_then(UiEventHandler::as_script).unwrap().clone();
+        let _=life.invoke_callback_transactional(&engine,&cancel,UiValue::Null).map_err(error)?;
+        assert_eq!(state("confirm"),UiValue::String(String::new()));
+        assert_eq!(state("busy"),UiValue::Bool(true),"cancelling the dialog must not unlock Git mutations");
+        runtime.borrow_mut().component_state.set(&state_path,"confirm",UiValue::String("pull".into())).map_err(error)?;
+        let tree=life.render(&mut engine).map_err(error)?;
+        assert_eq!(node_with_key(tree,"confirmation-confirm").unwrap().attributes().get("disabled"),Some(&UiValue::Bool(true)),"confirmation must not start concurrent Git mutations");
+        assert_eq!(node_with_key(tree,"confirmation-cancel").unwrap().attributes().get("disabled"),Some(&UiValue::Bool(false)));
+        runtime.borrow_mut().component_state.set(&state_path,"busy",saved_busy).map_err(error)?;
+        runtime.borrow_mut().component_state.set(&state_path,"confirm",saved_confirm).map_err(error)?;
+    }
     if state("sensitive_review") != UiValue::Null {
         let result = UiValue::Map(BTreeMap::from([
             ("ok".into(), UiValue::Bool(false)),

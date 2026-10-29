@@ -672,7 +672,7 @@ fn confirmation(ctx) {
     if c == "tag-retry" { return tag_retry_bar(ctx); }
     let label = if c == "abort-merge" {"Abort this Git merge and restore the pre-merge state?"} else if c == "rollback-all" {"Roll back all committed files to HEAD? New files will be kept."} else if c == "delete-file" {`Delete ${ctx.get_state("delete_path")} from disk?`} else if c == "rollback" {`Roll back ${ctx.get_state("rollback_path")} to HEAD?`} else if c == "push" {"No upstream is configured. Push this branch and set its upstream on the configured push remote?"} else if c == "pull" {"Pull and merge changes from the configured upstream?"} else if c == "close" {"Close Alloy and discard unsaved work? An in-flight Git operation may still finish."} else if c == "delete" {"Delete this conflicted file and stage the deletion?"} else {"Discard your unsaved draft?"};
     let handler = if c == "abort-merge" {Fn("abort_merge_now")} else if c == "delete-file" {Fn("delete_file_now")} else if c == "rollback" || c == "rollback-all" {Fn("rollback_now")} else if c == "push" || c == "pull" {Fn("network_confirm")} else if c == "close" {Fn("close_now")} else if c == "delete" {Fn("delete_now")} else {Fn("discard_now")};
-    row([text(label),button(ctx,"Confirm",handler,(),true),button(ctx,"Cancel",Fn("cancel"),(),true)])
+    row([text(label),button(ctx,"Confirm",handler,(),true).with_key("confirmation-confirm").disabled(c!="close" && ctx.get_state("busy")),button(ctx,"Cancel",Fn("cancel"),(),true).with_key("confirmation-cancel").disabled(false)])
         .with_style(style().padding(px(12)).gap(px(10)).items_center().background(theme_color("selection")))
 }
 fn has_message(ctx) { let value = ctx.get_state("commit"); value.trim(); value != "" }
