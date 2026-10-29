@@ -58,6 +58,7 @@ impl ScriptViewExtension for GitExtension {
                     id: CapabilityId::parse("alloy.boot").map_err(|e| e.to_string())?,
                     version: semver::Version::new(1, 0, 0),
                     methods: BTreeMap::from([
+                        ("file_rows".into(), CapabilityMethod {input:ValueSchema::UiValue, output:ValueSchema::UiValue}),
                         (
                             "shortcuts".into(),
                             CapabilityMethod {
@@ -640,7 +641,8 @@ mod awake_preferences_tests {
     }
 }
 impl CapabilityHandler for Boot {
-    fn call(&mut self, method: &str, _: UiValue) -> Result<UiValue, String> {
+    fn call(&mut self, method: &str, input: UiValue) -> Result<UiValue, String> {
+        if method == "file_rows" {return Ok(to_ui(alloy::projects::file_rows(&from_ui(input))));}
         Ok(to_ui(if method == "shortcuts" {
             crate::shortcuts::catalog()
         } else {

@@ -8,6 +8,7 @@ use std::{
 };
 
 pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
+    let exercise_large_project = fixture.is_none();
     let sources = EmbeddedScriptSource::new(
         gpui_rhai_registry::BUNDLED_COMPONENT_SOURCES_BY_ID
             .iter()
@@ -131,6 +132,48 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
             .cloned()
             .unwrap()
     };
+    // Exercise the full recent-project limit, including an unopened large workspace.
+    let saved_projects = get("projects");
+    let saved_loading = get("projects_loading");
+    let saved_pending = get("summaries_pending");
+    let projects = (0..30).map(|i| crate::bridge::to_ui(serde_json::json!({
+        "root":format!("/alloy-test/project-{i}"), "name":format!("project-{i}"),
+        "branch":"main", "upstream":"origin/main", "files":9868, "added":9868,
+        "modified":0, "deleted":0, "staged":0, "conflicts":0, "ahead":1, "behind":2, "error":""
+    }))).collect();
+    for (field, value) in [
+        ("projects", UiValue::Array(projects)),
+        ("projects_loading", UiValue::Bool(false)),
+        ("summaries_pending", UiValue::Bool(false)),
+    ] {runtime.borrow_mut().component_state.set(&state_path, field, value).map_err(error)?;}
+    let toggle_projects = engine.callback(&compiled, "projects_toggle").map_err(error)?;
+    let tasks_before_open = runtime.borrow().tasks.active_count();
+    let started = std::time::Instant::now();
+    let _ = life.invoke_callback_transactional(&engine, &toggle_projects, UiValue::Bool(true)).map_err(error)?;
+    let tree = life.render(&mut engine).map_err(error)?;
+    eprintln!("30-project dropdown render: {:?}", started.elapsed());
+    let menu = node_with_key(tree, "project-menu").expect("project dropdown is visible");
+    assert_eq!(overlay_count(menu), 0, "project statistics must not create hundreds of tooltip overlays");
+    for i in 0..30 {assert!(node_with_key(menu, &format!("project-/alloy-test/project-{i}")).is_some());}
+    assert_eq!(get("projects_loading"), UiValue::Bool(false));
+    assert_eq!(runtime.borrow().tasks.active_count(), tasks_before_open, "opening cached projects must not start a scan");
+    let refresh = engine.callback(&compiled, "refresh_project_summaries").map_err(error)?;
+    let _ = life.invoke_callback_transactional(&engine, &refresh, UiValue::Null).map_err(error)?;
+    assert_eq!(get("summaries_pending"), UiValue::Bool(true));
+    let tasks_refreshing = runtime.borrow().tasks.active_count();
+    assert_eq!(tasks_refreshing, tasks_before_open + 1);
+    for value in [false, true, false] {
+        let _ = life.invoke_callback_transactional(&engine, &toggle_projects, UiValue::Bool(value)).map_err(error)?;
+        let _ = life.invoke_callback_transactional(&engine, &refresh, UiValue::Null).map_err(error)?;
+    }
+    assert_eq!(runtime.borrow().tasks.active_count(), tasks_refreshing, "reopening during refresh must reuse the pending scan");
+    runtime.borrow_mut().component_state.set(&state_path, "summaries_pending", UiValue::Bool(false)).map_err(error)?;
+    runtime.borrow_mut().component_state.set(&state_path, "projects_loading", UiValue::Bool(true)).map_err(error)?;
+    let _ = life.invoke_callback_transactional(&engine, &refresh, UiValue::Null).map_err(error)?;
+    assert_eq!(runtime.borrow().tasks.active_count(), tasks_refreshing, "initial project loading must not overlap a timer scan");
+    for (field, value) in [("projects", saved_projects), ("projects_loading", saved_loading), ("summaries_pending", saved_pending)] {
+        runtime.borrow_mut().component_state.set(&state_path, field, value).map_err(error)?;
+    }
     // The same registration page supports direct models, without returning saved keys.
     let original_agents = get("acp_agents");
     let original_acp = get("selected_acp");
@@ -807,7 +850,7 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
     // Commit text belongs to the staged selection, not the currently previewed file.
     // Drive real lifecycle callbacks so automatic refresh and project-session restore
     // exercise the same invalidation path as interactive staging.
-    let invoke = |life: &mut ScriptLifecycle, name: &str, payload: UiValue| -> Result<(), String> {
+    let invoke = |engine: &RuntimeEngine, life: &mut ScriptLifecycle, name: &str, payload: UiValue| -> Result<(), String> {
         let callback = engine.callback(&compiled, name).map_err(error)?;
         let _ = life.invoke_callback_transactional(&engine, &callback, payload).map_err(error)?;
         Ok(())
@@ -828,22 +871,22 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
     let unstaged = file("b.rs", " ", "M");
     let root = "/alloy-test/commit-selection";
     let original = selection_snapshot(root, vec![staged.clone(), unstaged.clone()]);
-    invoke(&mut life, "loaded", selection_reply(original.clone(), Some("previous generated message")))?;
+    invoke(&engine, &mut life, "loaded", selection_reply(original.clone(), Some("previous generated message")))?;
     for files in [
         vec![staged.clone(), unstaged.clone()],
         vec![unstaged.clone(), staged.clone()],
         vec![staged.clone(), unstaged.clone(), file("new.rs", "?", "?")],
     ] {
-        invoke(&mut life, "loaded", selection_reply(selection_snapshot(root, files), None))?;
+        invoke(&engine, &mut life, "loaded", selection_reply(selection_snapshot(root, files), None))?;
         assert_eq!(get("commit"), UiValue::String("previous generated message".into()), "unchanged staging must retain the message");
     }
     let changed = selection_snapshot(root, vec![staged.clone(), file("b.rs", "M", " ")]);
-    invoke(&mut life, "loaded", selection_reply(changed.clone(), None))?;
+    invoke(&engine, &mut life, "loaded", selection_reply(changed.clone(), None))?;
     assert_eq!(get("commit"), UiValue::String(String::new()), "external staging change must clear stale text");
-    invoke(&mut life, "loaded", selection_reply(original.clone(), Some("new generated message")))?;
+    invoke(&engine, &mut life, "loaded", selection_reply(original.clone(), Some("new generated message")))?;
     assert_eq!(get("commit"), UiValue::String("new generated message".into()), "a new generation overrides invalidation in its own result");
     let partial = selection_snapshot(root, vec![file("a.rs", "M", "M"), unstaged.clone()]);
-    invoke(&mut life, "loaded", selection_reply(partial, None))?;
+    invoke(&engine, &mut life, "loaded", selection_reply(partial, None))?;
     assert_eq!(get("commit"), UiValue::String(String::new()), "full to partial inclusion must clear stale text");
     for (action, payload) in [
         ("toggle_include", UiValue::String("a.rs".into())),
@@ -851,18 +894,66 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
         ("stage", UiValue::Null),
         ("unstage", UiValue::Null),
     ] {
-        invoke(&mut life, "loaded", selection_reply(original.clone(), Some("stale message")))?;
-        invoke(&mut life, action, payload)?;
+        invoke(&engine, &mut life, "loaded", selection_reply(original.clone(), Some("stale message")))?;
+        invoke(&engine, &mut life, action, payload)?;
         assert_eq!(get("commit"), UiValue::String(String::new()), "{action} must clear text before Git responds");
         assert_eq!(get("busy"), UiValue::Bool(true));
-        invoke(&mut life, "failed", UiValue::String("simulated staging completion".into()))?;
+        invoke(&engine, &mut life, "failed", UiValue::String("simulated staging completion".into()))?;
     }
-    invoke(&mut life, "loaded", selection_reply(original.clone(), Some("project A message")))?;
+    invoke(&engine, &mut life, "loaded", selection_reply(original.clone(), Some("project A message")))?;
     let other = selection_snapshot("/alloy-test/commit-selection-other", vec![staged]);
-    invoke(&mut life, "loaded", selection_reply(other, None))?;
-    invoke(&mut life, "loaded", selection_reply(changed, None))?;
+    invoke(&engine, &mut life, "loaded", selection_reply(other, None))?;
+    invoke(&engine, &mut life, "loaded", selection_reply(changed, None))?;
     assert_eq!(get("commit"), UiValue::String(String::new()), "project restore must reject a message for an older selection");
     life.render(&mut engine).map_err(error)?;
+    if exercise_large_project {
+        // Repaint between press/release must not discard a project choice. Use
+        // the actual row binding, then complete a large repository transition.
+        let projects = crate::bridge::to_ui(serde_json::json!({"projects":[{
+            "root":"/alloy-test/large", "name":"large", "branch":"main", "upstream":"",
+            "files":9868,"added":9868,"modified":0,"deleted":0,"staged":0,
+            "conflicts":0,"ahead":0,"behind":0,"error":""
+        }]}));
+        invoke(&engine, &mut life,"projects_loaded",projects)?;
+        invoke(&engine, &mut life,"projects_toggle",UiValue::Bool(true))?;
+        let tree=life.render(&mut engine).map_err(error)?;
+        let pointer=node_with_key(tree,"project-/alloy-test/large").unwrap()
+            .handler("pointer_up").and_then(UiEventHandler::as_script).unwrap().clone();
+        let pointer_event=|button| crate::bridge::to_ui(serde_json::json!({"button":button,"click_count":1}));
+        let _=life.invoke_callback_transactional(&engine,&pointer,pointer_event("right")).map_err(error)?;
+        assert_eq!(get("projects_open"),UiValue::Bool(true));
+        life.render(&mut engine).map_err(error)?;
+        let _=life.invoke_callback_transactional(&engine,&pointer,pointer_event("left")).map_err(error)?;
+        assert_eq!(get("projects_open"),UiValue::Bool(false));
+        assert_eq!(get("busy"),UiValue::Bool(true));
+        let large=selection_snapshot("/alloy-test/large",(0..9868).map(|i|file(&format!("untracked/{i}.txt"),"?","?")).collect());
+        invoke(&engine, &mut life,"loaded",selection_reply(large,None))?;
+        assert_eq!(get("busy"),UiValue::Bool(false));
+        let started=std::time::Instant::now();
+        let tree=life.render(&mut engine).map_err(error)?;
+        let spec=match node_with_key(tree,"file-list").unwrap().kind() {
+            UiNodeKind::VirtualCollection {spec}=>spec,
+            _=>panic!("large repositories must virtualize their changed files")
+        };
+        let id=spec.id.clone();
+        assert!(spec.realized.len()<100,"only visible rows should be built");
+        runtime.borrow().virtual_requests.request(id.clone(),[0,1,9867,9868]);
+        life.realize_virtual_requests(&mut engine).map_err(error)?;
+        eprintln!("9,868-file project render and distant row realization: {:?}",started.elapsed());
+        let rows=match node_with_key(life.root().unwrap(),"file-list").unwrap().kind() {
+            UiNodeKind::VirtualCollection {spec}=>&spec.realized,
+            _=>unreachable!()
+        };
+        for index in [0,1,9867,9868] {assert!(rows.contains_key(&index));}
+        invoke(&engine,&mut life,"filter_change",UiValue::String("9867.txt".into()))?;
+        assert!(matches!(get("large_file_rows"),UiValue::Array(rows) if rows.len()==2),"filtering must rebuild the virtual data");
+        invoke(&engine,&mut life,"collapse_group",UiValue::String("Unversioned Files".into()))?;
+        assert!(matches!(get("large_file_rows"),UiValue::Array(rows) if rows.len()==1),"folding must hide file rows");
+        invoke(&engine, &mut life,"project_choose",UiValue::String("/alloy-test/small".into()))?;
+        assert_eq!(get("busy"),UiValue::Bool(true),"large projects must allow another project switch");
+        invoke(&engine, &mut life,"failed",UiValue::String("Simulated open failure".into()))?;
+        assert_eq!(get("busy"),UiValue::Bool(false),"an open failure must permit retry");
+    }
     Ok(())
 }
 fn error(e: impl std::fmt::Display) -> String {
@@ -897,6 +988,15 @@ fn text_occurrences(node: &UiNode, value: &str) -> usize {
         UiNodeKind::Box{children} | UiNodeKind::Fragment{children} => children.iter().map(|child| text_occurrences(child,value)).sum(),
         UiNodeKind::Overlay{trigger,content,..} => text_occurrences(trigger,value)+text_occurrences(content,value),
         UiNodeKind::Layer{content,..} => text_occurrences(content,value),
+        _ => 0,
+    }
+}
+
+fn overlay_count(node: &UiNode) -> usize {
+    match node.kind() {
+        UiNodeKind::Box { children } | UiNodeKind::Fragment { children } => children.iter().map(overlay_count).sum(),
+        UiNodeKind::Overlay { trigger, content, .. } => 1 + overlay_count(trigger) + overlay_count(content),
+        UiNodeKind::Layer { content, .. } => overlay_count(content),
         _ => 0,
     }
 }

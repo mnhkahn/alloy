@@ -244,9 +244,109 @@ impl Projects {
             .collect()
     }
 }
+/// Build large file-list data in Rust: repeated Rhai array pushes recursively
+/// validate the growing array and turn a large repository into quadratic work.
+/// This is a pure projection; it never touches repositories or the filesystem.
+pub fn file_rows(input: &serde_json::Value) -> serde_json::Value {
+    use serde_json::json;
+    let mut rows = Vec::new();
+    let filter = input["filter"].as_str().unwrap_or_default().to_lowercase();
+    let Some(files) = input["files"].as_array() else {
+        return json!(rows);
+    };
+    for group in ["Merge Conflicts", "Changes", "Unversioned Files"] {
+        let files: Vec<_> = files
+            .iter()
+            .filter(|file| {
+                let kind = if file["conflict"] == true {
+                    "Merge Conflicts"
+                } else if file["index"] == "?" {
+                    "Unversioned Files"
+                } else {
+                    "Changes"
+                };
+                kind == group
+                    && file["path"].as_str().is_some_and(|path| {
+                        filter.is_empty() || path.to_lowercase().contains(&filter)
+                    })
+            })
+            .collect();
+        if files.is_empty() {
+            continue;
+        }
+        if let Some(requested) = input["group"].as_str() {
+            if requested == group {
+                return json!(
+                    files
+                        .iter()
+                        .filter_map(|file| file["path"].as_str())
+                        .collect::<Vec<_>>()
+                );
+            }
+            continue;
+        }
+        let paths: Vec<_> = files
+            .iter()
+            .filter_map(|file| file["path"].as_str())
+            .collect();
+        let count = paths
+            .iter()
+            .filter(|path| input["checked"][**path] == true)
+            .count();
+        let mixed = paths
+            .iter()
+            .any(|path| input["partial"].get(*path).is_some());
+        let folded = input["collapsed"][group] == true;
+        rows.push(
+            json!({"key":format!("group-{group}"),"kind":"group","group":group,
+            "count":count,"total":files.len(),"mixed":mixed,"folded":folded,"paths":null}),
+        );
+        if folded {
+            continue;
+        }
+        for file in files {
+            let path = file["path"].as_str().unwrap();
+            rows.push(json!({"key":format!("file-{path}"),"kind":"file","file":file,
+                "included":input["checked"][path] == true,"mixed":input["partial"].get(path).is_some()}));
+        }
+    }
+    json!(rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn large_file_rows_preserve_filtering_groups_and_staging() {
+        use serde_json::json;
+        let mut input = json!({"files":[
+            {"path":"src/New.rs","index":"?","work":"?","conflict":false},
+            {"path":"src/Modified.rs","index":"M","work":"M","conflict":false},
+            {"path":"src/Conflict.rs","index":"U","work":"U","conflict":true},
+            {"path":"README.md","index":"M","work":" ","conflict":false}
+        ],"checked":{"src/Modified.rs":true},"partial":{"src/Modified.rs":true},
+        "collapsed":{},"filter":"SRC/"});
+        let rows = file_rows(&input);
+        let rows = rows.as_array().unwrap();
+        assert_eq!(rows.len(), 6);
+        assert_eq!(rows[0]["group"], "Merge Conflicts");
+        assert_eq!(rows[2]["group"], "Changes");
+        assert_eq!(rows[2]["count"], 1);
+        assert_eq!(rows[2]["mixed"], true);
+        assert_eq!(rows[2]["paths"], serde_json::Value::Null);
+        input["group"] = json!("Changes");
+        assert_eq!(file_rows(&input), json!(["src/Modified.rs"]));
+        input.as_object_mut().unwrap().remove("group");
+        assert_eq!(rows[3]["included"], true);
+        assert_eq!(rows[3]["mixed"], true);
+        assert_eq!(rows[4]["group"], "Unversioned Files");
+        input["collapsed"] = json!({"Changes":true});
+        let rows = file_rows(&input);
+        assert_eq!(rows.as_array().unwrap().len(), 5);
+        assert_eq!(rows[2]["folded"], true);
+        input["filter"] = json!("absent");
+        assert_eq!(file_rows(&input), json!([]));
+    }
     #[test]
     fn registered_models_persist_without_exposing_keys_to_ui() {
         use std::os::unix::fs::PermissionsExt;
