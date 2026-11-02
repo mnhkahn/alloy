@@ -153,11 +153,11 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
             .cloned()
             .unwrap()
     };
-    // Exercise the full recent-project limit, including an unopened large workspace.
+    // Project history has no count cap; only visible dropdown rows are built.
     let saved_projects = get("projects");
     let saved_loading = get("projects_loading");
     let saved_pending = get("summaries_pending");
-    let projects = (0..30).map(|i| crate::bridge::to_ui(serde_json::json!({
+    let projects = (0..500).map(|i| crate::bridge::to_ui(serde_json::json!({
         "root":format!("/alloy-test/project-{i}"), "name":format!("project-{i}"),
         "branch":"main", "upstream":"origin/main", "files":9868, "added":9868,
         "modified":0, "deleted":0, "staged":0, "conflicts":0, "ahead":1, "behind":2, "error":""
@@ -167,15 +167,26 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
         ("projects_loading", UiValue::Bool(false)),
         ("summaries_pending", UiValue::Bool(false)),
     ] {runtime.borrow_mut().component_state.set(&state_path, field, value).map_err(error)?;}
+    let cache_projects = engine.callback(&compiled, "set_projects").map_err(error)?;
+    let _ = life.invoke_callback_transactional(&engine, &cache_projects, get("projects")).map_err(error)?;
     let toggle_projects = engine.callback(&compiled, "projects_toggle").map_err(error)?;
     let tasks_before_open = runtime.borrow().tasks.active_count();
     let started = std::time::Instant::now();
     let _ = life.invoke_callback_transactional(&engine, &toggle_projects, UiValue::Bool(true)).map_err(error)?;
     let tree = life.render(&mut engine).map_err(error)?;
-    eprintln!("30-project dropdown render: {:?}", started.elapsed());
+    eprintln!("500-project dropdown render: {:?}", started.elapsed());
     let menu = node_with_key(tree, "project-menu").expect("project dropdown is visible");
     assert_eq!(overlay_count(menu), 0, "project statistics must not create hundreds of tooltip overlays");
-    for i in 0..30 {assert!(node_with_key(menu, &format!("project-/alloy-test/project-{i}")).is_some());}
+    let spec = match node_with_key(menu, "project-list").unwrap().kind() {
+        UiNodeKind::VirtualCollection {spec} => spec,
+        _ => panic!("project dropdown must use a virtual list"),
+    };
+    assert_eq!(spec.data.len(), 500);
+    assert!(spec.realized.len() < 20, "only visible projects should be built");
+    let collection_id = spec.id.clone();
+    runtime.borrow().virtual_requests.request(collection_id, [0, 29, 499]);
+    life.realize_virtual_requests(&mut engine).map_err(error)?;
+    for i in [0, 29, 499] {assert!(node_with_key(life.root().unwrap(), &format!("project-/alloy-test/project-{i}")).is_some());}
     assert_eq!(get("projects_loading"), UiValue::Bool(false));
     assert_eq!(runtime.borrow().tasks.active_count(), tasks_before_open, "opening cached projects must not start a scan");
     let refresh = engine.callback(&compiled, "refresh_project_summaries").map_err(error)?;
@@ -195,6 +206,7 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
     for (field, value) in [("projects", saved_projects), ("projects_loading", saved_loading), ("summaries_pending", saved_pending)] {
         runtime.borrow_mut().component_state.set(&state_path, field, value).map_err(error)?;
     }
+    let _ = life.invoke_callback_transactional(&engine, &cache_projects, get("projects")).map_err(error)?;
     // The same registration page supports direct models, without returning saved keys.
     let original_agents = get("acp_agents");
     let original_acp = get("selected_acp");
@@ -929,6 +941,50 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
     assert_eq!(get("commit"), UiValue::String(String::new()), "project restore must reject a message for an older selection");
     life.render(&mut engine).map_err(error)?;
     if exercise_large_project {
+        // Cover the reported 177-file workspace and the virtualization boundary.
+        // Exercise the realized filename's click handler, not just its data.
+        for count in [40, 41, 100, 177, 200, 201] {
+            let snapshot = selection_snapshot("/alloy-test/medium", (0..count)
+                .map(|i| file(&format!("src/file-{i}.rs"), "M", " ")).collect());
+            invoke(&engine, &mut life, "loaded", selection_reply(snapshot, None))?;
+            let started = std::time::Instant::now();
+            let tree = life.render(&mut engine).map_err(error)?;
+            if count == 40 {
+                assert!(!matches!(node_with_key(tree, "file-list").unwrap().kind(), UiNodeKind::VirtualCollection {..}));
+                assert_eq!(get("large_file_rows"), UiValue::Null);
+                continue;
+            }
+            let spec = match node_with_key(tree, "file-list").unwrap().kind() {
+                UiNodeKind::VirtualCollection {spec} => spec,
+                _ => panic!("{count}-file repositories must virtualize their changed files"),
+            };
+            let id = spec.id.clone();
+            assert!(spec.realized.len() < count);
+            runtime.borrow().virtual_requests.request(id, [count]);
+            life.realize_virtual_requests(&mut engine).map_err(error)?;
+            let rows = match node_with_key(life.root().unwrap(), "file-list").unwrap().kind() {
+                UiNodeKind::VirtualCollection {spec} => &spec.realized,
+                _ => unreachable!(),
+            };
+            let path = format!("src/file-{}.rs", count - 1);
+            let label = node_with_key(rows.get(&count).unwrap(), &format!("file-label-{path}")).unwrap();
+            let callback = label.handler("click").and_then(UiEventHandler::as_script).unwrap().clone();
+            let _ = life.invoke_callback_transactional(&engine, &callback, UiValue::String(path.clone())).map_err(error)?;
+            assert_eq!(get("pending_path"), UiValue::String(path));
+            assert_eq!(get("selecting"), UiValue::Bool(true));
+            eprintln!("{count}-file render, distant row and click: {:?}", started.elapsed());
+            invoke(&engine, &mut life, "filter_change", UiValue::String("absent".into()))?;
+            life.render(&mut engine).map_err(error)?;
+            invoke(&engine, &mut life, "filter_change", UiValue::String(format!("file-{}.rs", count - 1)))?;
+            assert!(matches!(get("large_file_rows"), UiValue::Array(rows) if rows.len() == 2));
+            life.render(&mut engine).map_err(error)?;
+            invoke(&engine, &mut life, "collapse_group", UiValue::String("Changes".into()))?;
+            assert!(matches!(get("large_file_rows"), UiValue::Array(rows) if rows.len() == 1));
+            life.render(&mut engine).map_err(error)?;
+            invoke(&engine, &mut life, "selection_failed", UiValue::String("Simulated read completion".into()))?;
+            invoke(&engine, &mut life, "filter_change", UiValue::String(String::new()))?;
+            invoke(&engine, &mut life, "collapse_group", UiValue::String("Changes".into()))?;
+        }
         // Repaint between press/release must not discard a project choice. Use
         // the actual row binding, then complete a large repository transition.
         let projects = crate::bridge::to_ui(serde_json::json!({"projects":[{
@@ -1000,6 +1056,7 @@ fn node_with_key<'a>(node: &'a UiNode, key: &str) -> Option<&'a UiNode> {
         UiNodeKind::Box{children} | UiNodeKind::Fragment{children} => children.iter().find_map(|child| node_with_key(child,key)),
         UiNodeKind::Overlay{trigger,content,..} => node_with_key(trigger,key).or_else(|| node_with_key(content,key)),
         UiNodeKind::Layer{content,..} => node_with_key(content,key),
+        UiNodeKind::VirtualCollection{spec} => spec.realized.values().find_map(|child| node_with_key(child,key)),
         _ => None,
     }
 }
@@ -1019,6 +1076,7 @@ fn overlay_count(node: &UiNode) -> usize {
         UiNodeKind::Box { children } | UiNodeKind::Fragment { children } => children.iter().map(overlay_count).sum(),
         UiNodeKind::Overlay { trigger, content, .. } => 1 + overlay_count(trigger) + overlay_count(content),
         UiNodeKind::Layer { content, .. } => overlay_count(content),
+        UiNodeKind::VirtualCollection {spec} => spec.realized.values().map(overlay_count).sum(),
         _ => 0,
     }
 }

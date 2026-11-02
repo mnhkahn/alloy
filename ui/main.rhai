@@ -23,6 +23,7 @@ fn state_schema() { #{ fields: #{
     open_tabs: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
     summaries_pending: bool_field(false), summaries_error: string_field(""),
     large_file_rows: #{schema:#{type:"ui_value"}, "default":#{type:"null"}},
+    project_rows: #{schema:#{type:"ui_value"}, "default":#{type:"array",value:[]}},
     projects_open: bool_field(false), projects_loading: bool_field(false), add_project: bool_field(false),
     acp_page_open: bool_field(false), acp_select_open: bool_field(false),
     acp_agents: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
@@ -91,7 +92,7 @@ fn loaded(ctx, result) {
     if !result.ok {ctx.set_state("operation_error",result.message);}
     if "sensitive_review" in result {ctx.set_state("sensitive_review",result.sensitive_review);ctx.set_state("confirm","sensitive-commit");}
     if "tag_retry" in result { ctx.set_state("tag",result.tag_retry); ctx.set_state("confirm","tag-retry"); }
-    if "overview" in result { let projects = project_list(ctx); let found = false; for i in 0..projects.len() { if projects[i].root == result.overview.root { projects[i] = result.overview; found = true; } } if !found { projects.push(result.overview); } ctx.set_state("projects",projects); }
+    if "overview" in result { let projects = project_list(ctx); let found = false; for i in 0..projects.len() { if projects[i].root == result.overview.root { projects[i] = result.overview; found = true; } } if !found { projects.push(result.overview); } set_projects(ctx,projects); }
     if result.snapshot != () {
         ctx.set_state("file_menu", "");
         if "committed_paths" in result { ctx.set_state("committed_paths",result.committed_paths); }
@@ -292,6 +293,10 @@ fn closing(ctx, payload) {
 fn close_now(ctx, payload) { ctx.close_window(ctx.window_id()); }
 fn cancel(ctx, payload) { ctx.set_state("sensitive_review",()); ctx.set_state("confirm", ""); ctx.set_state("tag", ()); ctx.set_state("tag_choice", ""); }
 fn project_list(ctx) { let value = ctx.get_state("projects"); if value == () {[]} else {value} }
+fn set_projects(ctx,projects) {
+    ctx.set_state("projects",projects);
+    ctx.set_state("project_rows",ctx.call_capability("alloy.boot","project_rows",if projects==() {[]} else {projects}));
+}
 fn refresh_project_summaries(ctx,payload) {
     if ctx.get_state("summaries_pending") || ctx.get_state("projects_loading") {return;}
     ctx.set_state("summaries_pending",true);
@@ -302,14 +307,14 @@ fn project_summaries_loaded(ctx,result) {
     // Keep the active repository's newer, document-associated snapshot.
     let s=ctx.get_state("snapshot");let current=();
     if s!=() {for project in project_list(ctx) {if project.root==s.root {current=project;}}}
-    let projects=[];let found=false;
-    for project in result.projects {if current!=() && project.root==current.root {projects.push(current);found=true;} else {projects.push(project);}}
+    let projects=result.projects;let found=false;
+    if current!=() {for i in 0..projects.len() {if projects[i].root==current.root {projects[i]=current;found=true;break;}}}
     if current!=() && !found {projects.push(current);}
-    ctx.set_state("projects",projects);
+    set_projects(ctx,projects);
 }
 fn project_summaries_failed(ctx,error) {ctx.set_state("summaries_pending",false);ctx.set_state("summaries_error",`Project summaries: ${error}`);}
 fn projects_loaded(ctx, result) {
-    ctx.set_state("projects_loading",false); ctx.set_state("projects",result.projects);
+    ctx.set_state("projects_loading",false); set_projects(ctx,result.projects);
     if "acp_agents" in result {apply_ai_settings(ctx,result);}
 }
 fn projects_failed(ctx, error) { ctx.set_state("projects_loading",false); if ctx.get_state("acp_page_open") {acp_status(ctx,`无法加载 ACP 配置：${error}`);} else {status(ctx,`Cannot refresh projects: ${error}`);} }
@@ -732,9 +737,12 @@ fn awake_checkbox(ctx) {
       .with_key("keep-awake").with_style(style().height(px(24)).flex_shrink(false).padding_x(px(7)).gap(px(6)).items_center().radius(px(3)).background(theme_color("surface_raised")))
 }
 
+// File rows include menus and controls; eagerly rebuilding a few screens of
+// these on every timer tick already stalls input, well below 200 files.
+fn virtualize_files(s) {s != () && s.files.len()>40}
 fn sync_file_rows(ctx) {
     let s=ctx.get_state("snapshot");
-    if s==() || s.files.len()<=200 {ctx.set_state("large_file_rows",());return;}
+    if !virtualize_files(s) {ctx.set_state("large_file_rows",());return;}
     ctx.set_state("large_file_rows",ctx.call_capability("alloy.boot","file_rows",#{files:s.files,checked:inclusion(ctx),partial:partials(ctx),collapsed:ctx.get_state("collapsed"),filter:ctx.get_state("filter")}));
 }
 fn sidebar_file(ctx,f,merging,included,mixed) {
@@ -748,7 +756,7 @@ fn sidebar_file(ctx,f,merging,included,mixed) {
         text(name).with_style(style().flex_shrink(false).text_color(color)),
         text(directory).with_style(style().text_color(theme_color("text_muted")).min_width(px(0)).text_ellipsis().overflow_hidden())
     ]).with_style(style().height(relative(1)).flex_grow().min_width(px(0)).gap(px(5)).items_center().whitespace_nowrap().overflow_hidden())
-        .accessibility_label(f.path).on_click_value(Fn("select"),f.path).disabled(navigation_blocked(ctx));
+        .with_key(`file-label-${f.path}`).accessibility_label(f.path).on_click_value(Fn("select"),f.path).disabled(navigation_blocked(ctx));
     let row_style = style().height(px(26)).min_height(px(26)).flex_shrink(false).padding_left(px(22)).padding_right(px(6)).gap(px(6)).items_center();
     let row_style = row_style.radius(px(3)).background(if selected {theme_color("selection")} else {theme_color("surface_raised")}).hover(style().background(theme_color("surface_hover")));
     let file_row = row([check_box(ctx,`Stage ${f.path}`,included,mixed,Fn("toggle_include"),f.path,!f.conflict && !merging),label]).with_key(`file-${f.path}`).with_style(row_style);
@@ -762,8 +770,15 @@ fn sidebar_virtual_row(merging,ctx,payload) {
 fn sidebar_virtual_list(ctx,s,items) {
     let config=#{key:`file-list-${s.root}`,label:"Changed files",data:items,estimated_height:26,fill_height:true,overdraw_pixels:104};
     let d=ctx.get_state("doc");
-    if ctx.get_state("selecting") {config.reveal_key=`file-${ctx.get_state("pending_path")}`;}
-    else if d!=() {config.reveal_key=`file-${d.path}`;}
+    let path=if ctx.get_state("selecting") {ctx.get_state("pending_path")} else if d!=() {d.path} else {""};
+    if path!="" && path.to_lower().contains(ctx.get_state("filter").to_lower()) {
+        let groups=ctx.get_state("collapsed");
+        for file in s.files {if file.path==path {
+            let group=file_group(file);
+            if groups==() || !(group in groups && groups[group]) {config.reveal_key=`file-${path}`;}
+            break;
+        }}
+    }
     virtual_collection(config,Fn("sidebar_virtual_row").curry(s.merging)).with_key("file-list").with_style(style().flex_grow().min_height(px(0)))
 }
 fn toggle_visible_group(ctx,group) {
@@ -778,7 +793,7 @@ fn sidebar_group(ctx,group,count,total,mixed,folded,paths,merging) {
 }
 
 fn sidebar(ctx,s) {
-    let virtualized=s.files.len()>200;
+    let virtualized=virtualize_files(s);
     let items = []; let checked = inclusion(ctx); let partial = partials(ctx); let groups = ctx.get_state("collapsed");
     let filter = ctx.get_state("filter").to_lower();
     if virtualized {
@@ -910,21 +925,25 @@ fn project_form(ctx) {
         button(ctx,"Open",Fn("open_repo"),(),true),button(ctx,"Browse…",Fn("browse"),(),true),button(ctx,"Cancel",Fn("project_add"),(),true)
     ]).with_style(style().padding_x(px(10)).padding_y(px(4)).gap(px(6)).items_center())
 }
+fn project_virtual_row(ctx,payload) {
+    let p=payload.item;let s=ctx.get_state("snapshot");
+    let active=s!=() && s.root==p.root;
+    let counts=if p.error!="" {text("! Repository unavailable · choose to retry").with_style(style().text_color(theme_color("danger")).font_weight(600))} else {git_metrics(`project-status-${p.root}`,p,false)};
+    column([
+        row([text(if active {`✓ ${p.name}`} else {p.name}).with_style(style().font_weight(600).flex_shrink(false)),small(p.branch),small(p.root).with_style(style().flex_grow().min_width(px(0)).text_ellipsis().overflow_hidden())]).with_style(style().gap(px(12)).items_center().whitespace_nowrap()),
+        counts
+    ]).with_key(`project-${p.root}`).with_style(style().height(px(54)).min_height(px(54)).flex_shrink(false).padding_x(px(12)).padding_y(px(6)).gap(px(2)).background(if active {theme_color("selection")} else {theme_color("surface_raised")}).hover(style().background(theme_color("surface_hover"))))
+    .tab_index(0).on_key_value("enter",Fn("project_choose"),p.root).accessibility_role("button").accessibility_label(`Open project ${p.root}`).on("pointer_up",Fn("project_pointer").curry(p.root)).disabled(ctx.get_state("busy") || ctx.get_state("selecting"))
+}
 fn project_menu(ctx) {
     if !ctx.get_state("projects_open") { return row([]); }
-    let nodes = [small(if ctx.get_state("summaries_error")!="" {ctx.get_state("summaries_error")} else if ctx.get_state("projects_loading") || ctx.get_state("summaries_pending") {"Refreshing project summaries…"} else {"Recent projects · refreshed automatically · remote counts reflect the last Fetch"}).with_style(style().padding_x(px(10)))];
-    let s = ctx.get_state("snapshot");
-    for p in project_list(ctx) {
-        let active = s != () && s.root == p.root;
-        let counts=if p.error!="" {text("! Repository unavailable · choose to retry").with_style(style().text_color(theme_color("danger")).font_weight(600))} else {git_metrics(`project-status-${p.root}`,p,false)};
-        nodes.push(column([
-            row([text(if active {`✓ ${p.name}`} else {p.name}).with_style(style().font_weight(600)),small(p.branch),small(p.root)]).with_style(style().gap(px(12)).items_center()),
-            counts
-        ]).with_key(`project-${p.root}`).with_style(style().padding_x(px(12)).padding_y(px(6)).gap(px(2)).background(if active {theme_color("selection")} else {theme_color("surface_raised")}).hover(style().background(theme_color("surface_hover"))))
-        .tab_index(0).on_key_value("enter",Fn("project_choose"),p.root).accessibility_role("button").accessibility_label(`Open project ${p.root}`).on("pointer_up",Fn("project_pointer").curry(p.root)).disabled(ctx.get_state("busy") || ctx.get_state("selecting")));
-    }
-    if project_list(ctx).len() == 0 && !ctx.get_state("projects_loading") { nodes.push(small("No recent projects. Add a repository to begin.")); }
-    column(nodes).with_key("project-menu").with_style(style().width(px(960)).max_height(px(360)).overflow_y_scroll().flex_shrink(false).padding(px(6)).gap(px(3)).background(theme_color("surface_raised")))
+    let nodes=[small(if ctx.get_state("summaries_error")!="" {ctx.get_state("summaries_error")} else if ctx.get_state("projects_loading") || ctx.get_state("summaries_pending") {"Refreshing project summaries…"} else {"Recent projects · refreshed automatically · remote counts reflect the last Fetch"}).with_style(style().padding_x(px(10)))];
+    let projects=ctx.get_state("project_rows");
+    if projects.len()>0 {
+        let height=if projects.len()>5 {324} else {projects.len()*54};
+        nodes.push(virtual_collection(#{key:"recent-projects",label:"Recent projects",data:projects,estimated_height:54,height:height,overdraw_pixels:108},Fn("project_virtual_row")).with_key("project-list"));
+    } else if !ctx.get_state("projects_loading") {nodes.push(small("No recent projects. Add a repository to begin."));}
+    column(nodes).with_key("project-menu").with_style(style().width(px(960)).flex_shrink(false).padding(px(6)).gap(px(3)).background(theme_color("surface_raised")))
 }
 fn acp_config_page(ctx) {
     let agents=acp_agent_list(ctx);let rows=[];

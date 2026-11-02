@@ -59,6 +59,7 @@ impl ScriptViewExtension for GitExtension {
                     version: semver::Version::new(1, 0, 0),
                     methods: BTreeMap::from([
                         ("file_rows".into(), CapabilityMethod {input:ValueSchema::UiValue, output:ValueSchema::UiValue}),
+                        ("project_rows".into(), CapabilityMethod {input:ValueSchema::UiValue, output:ValueSchema::UiValue}),
                         (
                             "shortcuts".into(),
                             CapabilityMethod {
@@ -643,6 +644,17 @@ mod awake_preferences_tests {
 impl CapabilityHandler for Boot {
     fn call(&mut self, method: &str, input: UiValue) -> Result<UiValue, String> {
         if method == "file_rows" {return Ok(to_ui(alloy::projects::file_rows(&from_ui(input))));}
+        if method == "project_rows" {
+            let UiValue::Array(mut projects) = input else { return Err("Expected project array".into()); };
+            for project in &mut projects {
+                if let UiValue::Map(fields) = project {
+                    if let Some(UiValue::String(root)) = fields.get("root") {
+                        fields.insert("key".into(), UiValue::String(format!("project-{root}")));
+                    }
+                }
+            }
+            return Ok(UiValue::Array(projects));
+        }
         Ok(to_ui(if method == "shortcuts" {
             crate::shortcuts::catalog()
         } else {

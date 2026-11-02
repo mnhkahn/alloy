@@ -215,7 +215,6 @@ impl Projects {
     pub fn remember(&mut self, root: &str) {
         self.roots.retain(|r| r != root);
         self.roots.insert(0, root.into());
-        self.roots.truncate(30);
     }
     pub fn save(&self, path: &Path) -> Result<(), String> {
         let parent = path.parent().ok_or("Missing settings directory")?;
@@ -434,5 +433,19 @@ mod tests {
         let p = Projects::read(&path).unwrap();
         assert_eq!(p.roots, vec!["/missing/one", "/missing/two"]);
         assert!(!p.overview()[0].error.is_empty());
+    }
+    #[test]
+    fn remembers_all_selected_projects_across_restarts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("projects.json");
+        let mut projects = Projects::default();
+        for i in 0..150 { projects.remember(&format!("/projects/{i}")); }
+        projects.remember("/projects/42");
+        projects.save(&path).unwrap();
+        let restored = Projects::read(&path).unwrap();
+        assert_eq!(restored.roots.len(), 150);
+        assert_eq!(restored.roots[0], "/projects/42");
+        assert_eq!(restored.roots.iter().filter(|root| *root == "/projects/42").count(), 1);
+        assert!(restored.roots.contains(&"/projects/0".to_string()));
     }
 }
