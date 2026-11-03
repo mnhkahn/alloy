@@ -20,6 +20,91 @@ fn fixture() -> (TempDir, Repository) {
     let repo = Repository::open(dir.path().to_str().unwrap()).unwrap();
     (dir, repo)
 }
+
+#[test]
+fn commit_followups_push_only_when_requested_and_bump_patch() {
+    use alloy::commit::{AfterCommit, finish};
+    for action in [AfterCommit::None, AfterCommit::Push, AfterCommit::PushAndTag] {
+        let (_dir, repo) = fixture();
+        let remote = TempDir::new().unwrap();
+        git(remote.path(), &["init", "--bare", "-b", "main"]);
+        git(&repo.root, &["remote", "add", "publish", remote.path().to_str().unwrap()]);
+        // The release destination must follow push configuration, even with origin present.
+        git(&repo.root, &["remote", "add", "origin", "/nonexistent/unused-origin.git"]);
+        git(&repo.root, &["config", "remote.pushDefault", "publish"]);
+        repo.create_tag("v1.2.3", &repo.head_sha().unwrap()).unwrap();
+        fs::write(repo.root.join("file.txt"), "updated\n").unwrap();
+        repo.stage("file.txt").unwrap();
+        repo.commit("fix: follow-up test").unwrap();
+        let head = repo.head_sha().unwrap();
+        finish(&repo, action, &head, true).unwrap();
+        assert_eq!(repo.head_sha().unwrap(), head, "follow-ups must not recommit");
+        let remote_head = run(remote.path(), &["rev-parse", "refs/heads/main"], None);
+        if action == AfterCommit::None {
+            assert!(remote_head.is_err());
+        } else {
+            assert_eq!(String::from_utf8(remote_head.unwrap()).unwrap().trim(), head);
+        }
+        if action == AfterCommit::PushAndTag {
+            assert_eq!(repo.tag_commit("v1.2.4").unwrap(), head);
+            let remote_tag = run(remote.path(), &["rev-parse", "refs/tags/v1.2.4^{}"], None).unwrap();
+            assert_eq!(String::from_utf8(remote_tag).unwrap().trim(), head);
+        } else {
+            assert!(!repo.local_tags().unwrap().contains(&"v1.2.4".to_string()));
+        }
+    }
+}
+
+#[test]
+fn failed_commit_push_keeps_commit_and_does_not_create_tag() {
+    let (_dir, repo) = fixture();
+    let head = repo.head_sha().unwrap();
+    let outcome = alloy::commit::finish(&repo, alloy::commit::AfterCommit::PushAndTag, &head, true);
+    assert!(matches!(outcome, Err(alloy::tag::TagError::Plain(message)) if message.contains("Push failed")));
+    assert_eq!(repo.head_sha().unwrap(), head);
+    assert!(repo.local_tags().unwrap().is_empty());
+}
+
+#[test]
+fn dirty_tree_tag_failure_keeps_successful_commit_push() {
+    let (_dir, repo) = fixture();
+    let remote = TempDir::new().unwrap();
+    git(remote.path(), &["init", "--bare", "-b", "main"]);
+    git(&repo.root, &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+    fs::write(repo.root.join("unselected.txt"), "keep this uncommitted").unwrap();
+    let head = repo.head_sha().unwrap();
+    let outcome = alloy::commit::finish(&repo, alloy::commit::AfterCommit::PushAndTag, &head, true);
+    assert!(matches!(outcome, Err(alloy::tag::TagError::Plain(message)) if message.contains("Commit and Push succeeded; Tag failed")));
+    let remote_head = run(remote.path(), &["rev-parse", "refs/heads/main"], None).unwrap();
+    assert_eq!(String::from_utf8(remote_head).unwrap().trim(), head);
+    assert!(repo.local_tags().unwrap().is_empty());
+    assert_eq!(fs::read_to_string(repo.root.join("unselected.txt")).unwrap(), "keep this uncommitted");
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_tag_push_retries_same_patch_without_recommitting() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_dir, repo) = fixture();
+    let remote = TempDir::new().unwrap();
+    git(remote.path(), &["init", "--bare", "-b", "main"]);
+    git(&repo.root, &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+    let hook = remote.path().join("hooks/update");
+    git(remote.path(), &["config", "core.hooksPath", remote.path().join("hooks").to_str().unwrap()]);
+    fs::write(&hook, "#!/bin/sh\ncase \"$1\" in refs/tags/*) exit 1;; esac\nexit 0\n").unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    let head = repo.head_sha().unwrap();
+    let outcome = alloy::commit::finish(&repo, alloy::commit::AfterCommit::PushAndTag, &head, true);
+    let Err(alloy::tag::TagError::PushFailed {version,commit,remote:remote_name,push_url,..}) = outcome else {
+        panic!("expected a retryable tag push failure");
+    };
+    assert_eq!(version, "v0.0.1");
+    assert_eq!(repo.tag_commit(&version).unwrap(), head);
+    fs::remove_file(hook).unwrap();
+    alloy::tag::retry_push(&repo, &version, &commit, &remote_name, &push_url).unwrap();
+    assert_eq!(repo.head_sha().unwrap(), head);
+    assert_eq!(repo.local_tags().unwrap(), vec![version]);
+}
 #[test]
 fn edit_save_stage_unstage_commit() {
     let (_dir, r) = fixture();

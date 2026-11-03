@@ -339,6 +339,7 @@ fn execute(data: &Value, initial: &str) -> Result<Value, String> {
     let mut message = "Repository refreshed".to_string();
     let mut commit_message = None;
     let mut committed = false;
+    let mut tag_retry = None;
     let mut operation_ok = true;
     match op {
         "bootstrap" | "open" | "clone" | "browse" => repo.stage_committed_changes()?,
@@ -430,12 +431,13 @@ fn execute(data: &Value, initial: &str) -> Result<Value, String> {
             message = "Committed staged changes.".into();
         }
         "ai_commit" => {
+            let after_commit = alloy::commit::AfterCommit::parse(string(data, "after_commit"))?;
             let confirmed_tree = string(data, "confirmed_tree");
             if let Some((files, tree)) = alloy::cmsg::sensitive_review(&repo)? {
                 if confirmed_tree != tree {
                     return Ok(
                         json!({"ok":false,"message":"AI commit blocked: sensitive filenames require your confirmation.","snapshot":repo.snapshot()?,"document":null,
-                        "sensitive_review":{"files":files,"tree":tree,"root":repo.root.to_string_lossy()}}),
+                        "sensitive_review":{"files":files,"tree":tree,"root":repo.root.to_string_lossy(),"after_commit":string(data,"after_commit"),"push_tag":flag(data,"push_tag")}}),
                     );
                 }
             }
@@ -451,7 +453,21 @@ fn execute(data: &Value, initial: &str) -> Result<Value, String> {
             match generated.commit_result {
                 Ok(_) => {
                     committed = true;
-                    message = "Committed staged changes.".into();
+                    let follow_up = repo.head_sha()
+                        .map_err(alloy::tag::TagError::Plain)
+                        .and_then(|head| alloy::commit::finish(&repo, after_commit, &head, flag(data, "push_tag")));
+                    match follow_up {
+                        Ok(done) => message = done,
+                        Err(alloy::tag::TagError::Plain(error)) => {
+                            operation_ok = false;
+                            message = error;
+                        }
+                        Err(alloy::tag::TagError::PushFailed {message:error,version,commit,remote,push_url}) => {
+                            operation_ok = false;
+                            message = error;
+                            tag_retry = Some(json!({"version":version,"commit":commit,"remote":remote,"push_url":push_url}));
+                        }
+                    }
                 }
                 Err(error) => {
                     operation_ok = false;
@@ -462,7 +478,7 @@ fn execute(data: &Value, initial: &str) -> Result<Value, String> {
         "tag_prepare" => {
             let preview = alloy::tag::prepare(&repo)?;
             return Ok(
-                json!({"ok":true,"message":format!("Tag base {}; pick s/m/l", preview.base),"tag_preview":preview,"snapshot":null,"document":null}),
+                json!({"ok":true,"message":format!("Tag base {}; pick patch/minor/major", preview.base),"tag_preview":preview,"snapshot":null,"document":null}),
             );
         }
         "tag_create" | "tag_push" => {
@@ -531,6 +547,7 @@ fn execute(data: &Value, initial: &str) -> Result<Value, String> {
     if op == "ai_commit" {
         result["committed"] = json!(committed);
         result["commit_message"] = json!(commit_message);
+        if let Some(retry) = tag_retry { result["tag_retry"] = retry; }
     }
     if matches!(op, "tag_create" | "tag_push") {
         result["tagged"] = json!(true);

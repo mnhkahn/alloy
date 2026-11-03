@@ -939,7 +939,20 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
     invoke(&engine, &mut life, "loaded", selection_reply(other, None))?;
     invoke(&engine, &mut life, "loaded", selection_reply(changed, None))?;
     assert_eq!(get("commit"), UiValue::String(String::new()), "project restore must reject a message for an older selection");
-    life.render(&mut engine).map_err(error)?;
+    let tree = life.render(&mut engine).map_err(error)?;
+    for (key, handler) in [("ai-commit", "ai_commit"), ("ai-commit-push", "ai_commit_push")] {
+        let button = node_with_key(tree, key).expect("the primary and secondary commit buttons must be visible");
+        assert_eq!(button.handler("click").and_then(UiEventHandler::as_script).unwrap().name(), handler);
+    }
+    assert!(node_with_key(tree, "ai-commit-more").is_some());
+    invoke(&engine, &mut life, "commit_menu_open_changed", UiValue::Bool(true))?;
+    let tree = life.render(&mut engine).map_err(error)?;
+    let menu = node_with_key(tree, "ai-commit-menu-content").expect("commit dropdown must open");
+    for label in ["Commit", "Commit and Push", "Commit, Push & Tag", "⌘K", "⌘⌥K", "⌘⌥⇧K"] {
+        assert_eq!(text_occurrences(menu, label), 1, "dropdown must show each action and its shortcut");
+    }
+    invoke(&engine, &mut life, "escape_action", UiValue::Null)?;
+    assert_eq!(get("commit_menu_open"), UiValue::Bool(false));
     if exercise_large_project {
         // Cover the reported 177-file workspace and the virtualization boundary.
         // Exercise the realized filename's click handler, not just its data.

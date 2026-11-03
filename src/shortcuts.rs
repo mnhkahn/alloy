@@ -73,6 +73,20 @@ pub const SHORTCUTS: &[(&str, &str, &str, &str, &str)] = &[
         "VCS",
     ),
     (
+        "cmd-alt-k",
+        "alloy.ai_commit_push",
+        "ai_commit_push",
+        "AI message, commit and push",
+        "VCS",
+    ),
+    (
+        "cmd-alt-shift-k",
+        "alloy.ai_commit_tag",
+        "ai_commit_tag",
+        "AI message, commit, push and patch tag",
+        "VCS",
+    ),
+    (
         "cmd-0",
         "alloy.commit_focus",
         "focus_commit",
@@ -208,6 +222,17 @@ pub fn catalog() -> serde_json::Value {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn all_commit_workflows_have_distinct_shortcuts() {
+        for (key, action, handler) in [
+            ("cmd-k", "alloy.ai_commit", "ai_commit"),
+            ("cmd-alt-k", "alloy.ai_commit_push", "ai_commit_push"),
+            ("cmd-alt-shift-k", "alloy.ai_commit_tag", "ai_commit_tag"),
+        ] {
+            assert!(super::SHORTCUTS.iter().any(|entry| entry.0 == key && entry.1 == action && entry.2 == handler));
+        }
+        assert!(super::SHORTCUTS.iter().any(|entry| entry.0 == "cmd-shift-k" && entry.1 == "alloy.push_prompt"));
+    }
     #[test]
     fn bindings_are_unique_and_leave_text_navigation_alone() {
         let mut keys = std::collections::BTreeSet::new();

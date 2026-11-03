@@ -1,6 +1,7 @@
 pub mod acp;
 pub mod awake;
 pub mod cmsg;
+pub mod commit;
 pub mod git;
 pub mod history;
 mod git_proxy;

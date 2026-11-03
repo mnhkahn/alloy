@@ -1122,6 +1122,18 @@ impl Repository {
         if !upstream.trim().is_empty() {
             return self.cmd(&["push"]);
         }
+        let remote = self.push_remote()?;
+        self.push_url(&remote)?;
+        let refspec = format!("{reference}:{reference}");
+        let output = self.cmd(&["push", "--set-upstream", "--", &remote, &refspec])?;
+        Ok(format!(
+            "Pushed {branch} and set upstream to {remote}/{branch}.\n{output}"
+        ))
+    }
+    /// Named destination selected by Git's branch/default push configuration.
+    pub fn push_remote(&self) -> Result<String> {
+        let branch = self.cmd(&["symbolic-ref", "--quiet", "--short", "HEAD"])?;
+        let branch = branch.trim();
         let remotes = self.remotes()?;
         let configured = [
             format!("branch.{branch}.pushRemote"),
@@ -1153,12 +1165,7 @@ impl Repository {
                     .into(),
             );
         };
-        self.push_url(&remote)?;
-        let refspec = format!("{reference}:{reference}");
-        let output = self.cmd(&["push", "--set-upstream", "--", &remote, &refspec])?;
-        Ok(format!(
-            "Pushed {branch} and set upstream to {remote}/{branch}.\n{output}"
-        ))
+        Ok(remote)
     }
     pub fn network(&self, action: &str) -> Result<String> {
         match action {

@@ -138,10 +138,14 @@ fn select_remote(repo: &Repository) -> Result<Option<String>, String> {
 /// whenever a remote is configured, a successful remote tag read — even when the
 /// user only wants a local tag.
 pub fn prepare(repo: &Repository) -> Result<TagPreview, String> {
+    prepare_for_remote(repo, select_remote(repo)?)
+}
+
+/// Automatic commit workflows use the same remote as the branch push.
+pub fn prepare_for_remote(repo: &Repository, remote: Option<String>) -> Result<TagPreview, String> {
     if !repo.clean()? {
         return Err("Tagging requires a clean working tree, including untracked files.".into());
     }
-    let remote = select_remote(repo)?;
     let mut tags = repo.local_tags()?;
     let mut push_url = String::new();
     if let Some(name) = &remote {

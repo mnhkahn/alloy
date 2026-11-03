@@ -1,4 +1,5 @@
 import "components/context_menu" as context_menu;
+import "components/menu" as menu;
 import "components/tooltip" as tooltip;
 import "components/watch_timer" as watch_timer;
 import "components/input" as input;
@@ -55,6 +56,7 @@ fn state_schema() { #{ fields: #{
     operation_error: string_field(""),
     sensitive_review: #{schema:#{type:"ui_value"}, "default":#{type:"null"}},
     busy: bool_field(false), ai_running: bool_field(false), editor: bool_field(false), base_view: bool_field(false),
+    commit_menu_open: bool_field(false), commit_menu_active: string_field("tag"),
     snapshot: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
     doc: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } }
 } } }
@@ -173,7 +175,7 @@ fn ai_finished(ctx,result) {
     ctx.set_state("ai_running",false);
     if keep {result.document=current;}
     loaded(ctx,result);
-    if keep && !("sensitive_review" in result) {load_selection(ctx,path,staged);}
+    if keep && !("sensitive_review" in result) && !("tag_retry" in result) {load_selection(ctx,path,staged);}
 }
 fn sync_update_guard(ctx) {let s=ctx.get_state("snapshot");ctx.call_capability("alloy.update","guard",#{blocked:watch_blocked(ctx) || (s!=() && s.merging)});}
 fn watch_invalidate(ctx) {ctx.set_state("watch_epoch",ctx.get_state("watch_epoch")+1);}
@@ -235,7 +237,7 @@ fn hide_sidebar(ctx,payload) {ctx.set_state("sidebar_visible",false); focus_diff
 fn focus_diff(ctx,payload) { let d=ctx.get_state("doc"); if d != () && d.images == () && d.note == "" { try {ctx.focus("active-diff");} catch (ignored) {} } }
 fn edit_focus(ctx,payload) {let d=ctx.get_state("doc"); if d != () && d.editable && !ctx.get_state("busy") && !ctx.get_state("selecting") {ctx.set_state("editor",true);ctx.set_state("focus_editor_id",ctx.get_state("focus_editor_id")+1);} }
 fn diff_settings(ctx,payload) { let d=ctx.get_state("doc"); if d != () && d.images == () {ctx.set_state("mode_open",true);} }
-fn escape_action(ctx,payload) {ctx.set_state("palette","");ctx.set_state("confirm","");ctx.set_state("projects_open",false);ctx.set_state("mode_open",false);ctx.set_state("whitespace_open",false);ctx.set_state("add_project",false);focus_diff(ctx,());}
+fn escape_action(ctx,payload) {ctx.set_state("palette","");ctx.set_state("confirm","");ctx.set_state("projects_open",false);ctx.set_state("commit_menu_open",false);ctx.set_state("mode_open",false);ctx.set_state("whitespace_open",false);ctx.set_state("add_project",false);focus_diff(ctx,());}
 fn push_prompt(ctx,payload) {
     if !guard(ctx) || ctx.get_state("snapshot")==() {return;}
     watch_invalidate(ctx);ctx.set_state("confirm","");ctx.set_state("busy",true);sync_update_guard(ctx);status(ctx,"Push…");
@@ -253,9 +255,15 @@ fn commit_shortcut(ctx,payload) {if ctx.get_state("snapshot") != () && has_messa
 fn sensitive_commit_now(ctx,payload) {
     let review=ctx.get_state("sensitive_review"); let s=ctx.get_state("snapshot");
     if review==() || s==() || review.root!=s.root {return;}
-    if guard(ctx) {ctx.set_state("confirm","");ctx.set_state("sensitive_review",());request(ctx,"ai_commit",#{confirmed_tree:review.tree});}
+    if guard(ctx) {ctx.set_state("confirm","");ctx.set_state("sensitive_review",());request(ctx,"ai_commit",#{confirmed_tree:review.tree,after_commit:if "after_commit" in review {review.after_commit} else {"commit"},push_tag:if "push_tag" in review {review.push_tag} else {false}});}
 }
-fn ai_commit(ctx,payload) {if guard(ctx) && ctx.get_state("snapshot") != () {request(ctx,"ai_commit",#{});}}
+fn ai_commit_action(ctx,action) {if guard(ctx) && ctx.get_state("snapshot") != () {ctx.set_state("commit_menu_open",false);request(ctx,"ai_commit",#{after_commit:action,push_tag:action=="tag"});}}
+fn ai_commit(ctx,payload) {ai_commit_action(ctx,"commit");}
+fn ai_commit_push(ctx,payload) {ai_commit_action(ctx,"push");}
+fn ai_commit_tag(ctx,payload) {ai_commit_action(ctx,"tag");}
+fn commit_menu_open_changed(ctx,open) {ctx.set_state("commit_menu_open",open);}
+fn commit_menu_active_changed(ctx,value) {ctx.set_state("commit_menu_active",value);}
+fn commit_menu_action(ctx,value) {if ["commit","push","tag"].contains(value) {ai_commit_action(ctx,value);}}
 fn palette_open(ctx,mode) {ctx.set_state("palette_query","");ctx.set_state("palette",mode);}
 fn find_action(ctx,payload) {palette_open(ctx,"actions");}
 fn vcs_actions(ctx,payload) {palette_open(ctx,"vcs");}
@@ -534,6 +542,7 @@ fn resolve(ctx, payload) { request(ctx, "resolve", save_data(ctx)); }
 fn delete_prompt(ctx, payload) { ctx.set_state("confirm", "delete"); }
 fn delete_now(ctx, payload) { request(ctx, "delete", save_data(ctx)); }
 fn shortcut_label(ctx,label,action) {for item in ctx.get_state("shortcuts") {if item.action==action {return `${label}  ${item.display_key}`;}} label}
+fn shortcut_key(ctx,action) {for item in ctx.get_state("shortcuts") {if item.action==action {return item.display_key;}} ""}
 fn fetch(ctx,payload) { if ctx.get_state("snapshot") != () {network(ctx,"fetch");} }
 fn network(ctx, op) { if guard(ctx) { request(ctx, op, #{}); } }
 fn tag_prompt(ctx, payload) { if guard(ctx) && ctx.get_state("snapshot") != () { request(ctx,"tag_prepare",#{}); } }
@@ -640,9 +649,9 @@ fn tag_bump_bar(ctx) {
     row([text(`Tag ${t.branch} @ ${t.head_short}`).with_style(style().max_width(px(190)).min_width(px(0)).text_ellipsis().overflow_hidden()),
         text(t.summary).with_style(style().max_width(px(280)).min_width(px(0)).text_ellipsis().overflow_hidden().text_color(theme_color("text_muted"))),
         small(`base ${t.base}`),
-        button(ctx,`s → ${t.versions.s}`,Fn("tag_choose"),"s",true),
-        button(ctx,`m → ${t.versions.m}`,Fn("tag_choose"),"m",true),
-        button(ctx,`l → ${t.versions.l}`,Fn("tag_choose"),"l",true),
+        button(ctx,`patch → ${t.versions.s}`,Fn("tag_choose"),"s",true),
+        button(ctx,`minor → ${t.versions.m}`,Fn("tag_choose"),"m",true),
+        button(ctx,`major → ${t.versions.l}`,Fn("tag_choose"),"l",true),
         button(ctx,"Cancel",Fn("cancel"),(),true)]).with_style(tag_bar_style())
 }
 fn tag_go_bar(ctx) {
@@ -669,6 +678,7 @@ fn confirmation(ctx) {
             text("AI 提交已拦截：以下文件名命中敏感文件规则").with_style(style().font_weight(700).text_color(theme_color("danger"))),
             text(files).with_style(style().max_height(px(120)).overflow_y_scroll()),
             text("请人工确认这些文件可以发送给所选 ACP 代理或直连模型并提交到 Git。授权仅对本次暂存内容有效。"),
+            text(if "after_commit" in review && review.after_commit=="tag" {"本次操作：生成 Message、Commit、Push 分支，再创建并推送 patch Tag。"} else if "after_commit" in review && review.after_commit=="push" {"本次操作：生成 Message、Commit 并 Push 分支。"} else {"本次操作：生成 Message 并 Commit。"}),
             row([button(ctx,"确认并继续 AI 提交",Fn("sensitive_commit_now"),(),true),button(ctx,"取消",Fn("cancel"),(),true)]).with_style(style().gap(px(8)))
         ]).with_style(style().padding(px(12)).gap(px(8)).flex_shrink(false).background(theme_color("surface_raised")).border(px(1)).border_color(theme_color("danger")));
     }
@@ -792,6 +802,20 @@ fn sidebar_group(ctx,group,count,total,mixed,folded,paths,merging) {
         .with_key(`group-${group}`).with_style(style().height(px(28)).min_height(px(28)).flex_shrink(false).padding_x(px(6)).gap(px(6)).items_center())
 }
 
+fn commit_actions(ctx,enabled) {
+    let primary=button(ctx,shortcut_label(ctx,"Commit","alloy.ai_commit"),Fn("ai_commit"),(),enabled)
+        .with_key("ai-commit").with_style(style().height(px(28)).padding_y(px(4)).border(px(1)).border_color(theme_color("accent")).background(theme_color("accent")).text_color(theme_color("on_accent")).hover(style().background(theme_color("accent_hover"))));
+    let push=button(ctx,"Commit and Push",Fn("ai_commit_push"),(),enabled)
+        .with_key("ai-commit-push").with_style(style().height(px(26)).padding_y(px(4)));
+    let arrow=text("▾").with_key("ai-commit-more").accessibility_role("button").accessibility_label("More commit actions").tab_index(0).disabled(!enabled || ctx.get_state("busy"))
+        .with_style(style().height(px(26)).padding_x(px(7)).padding_y(px(4)).font_size(px(12)).line_height(px(18)).border_left(px(1)).border_color(theme_color("border")).background(theme_color("surface_raised")).hover(style().background(theme_color("surface_hover"))).disabled(style().opacity(0.4)));
+    let dropdown=menu::Menu(#{key:"ai-commit-menu",label:"Commit actions",trigger:arrow,open:ctx.get_state("commit_menu_open"),active_value:ctx.get_state("commit_menu_active"),placement:"top",items:[
+        #{kind:"item",value:"commit",label:"Commit",shortcut:shortcut_key(ctx,"alloy.ai_commit"),disabled:!enabled || ctx.get_state("busy")},
+        #{kind:"item",value:"push",label:"Commit and Push",shortcut:shortcut_key(ctx,"alloy.ai_commit_push"),disabled:!enabled || ctx.get_state("busy")},
+        #{kind:"item",value:"tag",label:"Commit, Push & Tag",shortcut:shortcut_key(ctx,"alloy.ai_commit_tag"),disabled:!enabled || ctx.get_state("busy")}
+    ],on_open_change:Fn("commit_menu_open_changed"),on_active_change:Fn("commit_menu_active_changed"),on_action:Fn("commit_menu_action"),part_styles:#{content:style().width(px(310))}}).disabled(!enabled || ctx.get_state("busy"));
+    row([primary,row([push,dropdown]).with_style(style().gap(px(0)).items_center().border(px(1)).border_color(theme_color("border")).radius(px(3)))]).with_key("commit-actions").with_style(style().gap(px(8)).items_center())
+}
 fn sidebar(ctx,s) {
     let virtualized=virtualize_files(s);
     let items = []; let checked = inclusion(ctx); let partial = partials(ctx); let groups = ctx.get_state("collapsed");
@@ -817,17 +841,19 @@ fn sidebar(ctx,s) {
             }
         }
     }
-    let can_commit = has_message(ctx) && selected_count(ctx) > 0;
-    let footer = [textarea::Textarea(#{key:`commit-${ctx.get_state("focus_commit_id")}`,autofocus:ctx.get_state("focus_commit_id")>0,label:"Commit message",value:ctx.get_state("commit"),placeholder:"生成的提交信息会显示在这里",read_only:!s.merging,on_change:Fn("commit_change"),min_rows:4,max_rows:10})];
+    let can_commit = selected_count(ctx) > 0 && !ctx.get_state("selecting") && !dirty(ctx);
+    let footer = [
+        row([small("AI provider"),acp_agent_selector(ctx)]).with_style(style().items_center().justify_between()),
+        textarea::Textarea(#{key:`commit-${ctx.get_state("focus_commit_id")}`,autofocus:ctx.get_state("focus_commit_id")>0,label:"Commit message",value:ctx.get_state("commit"),placeholder:"生成的提交信息会显示在这里",read_only:!s.merging,on_change:Fn("commit_change"),min_rows:4,max_rows:10})
+    ];
     if s.merging {
         let unresolved=conflict_count(s);
         footer.push(small(if unresolved>0 {`${unresolved} conflict files remaining`} else {"All conflicts resolved · commit to finish the merge"}));
         footer.push(button(ctx,"Commit merge",Fn("commit_index"),(),unresolved==0 && has_message(ctx)));
         footer.push(button(ctx,"Abort merge…",Fn("abort_merge_prompt"),(),true));
     }
-    else { footer.push(button(ctx,`Commit ${selected_count(ctx)} staged files`,Fn("commit"),(),can_commit)); }
     if ctx.get_state("advanced") && !s.merging { footer.push(button(ctx,"Commit staged index",Fn("commit_index"),(),has_message(ctx))); }
-    footer.push(row([button(ctx,shortcut_label(ctx,"Commit","alloy.ai_commit"),Fn("ai_commit"),(),true),acp_agent_selector(ctx)]).with_style(style().gap(px(8)).items_center()));
+    footer.push(commit_actions(ctx,can_commit));
     column([
         row([text(if s.merging {"Merge"} else {"Commit"}).with_style(style().font_size(px(14)).font_weight(600)),button(ctx,"Refresh",Fn("refresh"),(),true),button(ctx,"Rollback all",Fn("rollback_all"),(),!s.merging && s.files.len()>0),button(ctx,if ctx.get_state("advanced") {"Hide staging"} else {"Staging…"},Fn("staging_toggle"),(),true)]).with_style(style().padding_x(px(6)).gap(px(6)).items_center()),
         input::Input(#{key:`filter-${ctx.get_state("focus_filter_id")}`,autofocus:ctx.get_state("focus_filter_id")>0,label:"Filter changed files",value:ctx.get_state("filter"),placeholder:"Filter files…",on_change:Fn("filter_change"),part_styles:#{input:style().height(px(26)).font_size(px(12))}}),
