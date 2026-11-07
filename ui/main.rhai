@@ -831,14 +831,14 @@ fn sidebar_group(ctx,group,count,total,mixed,folded,paths,merging) {
 }
 
 fn commit_actions(ctx,enabled) {
-    let primary=button(ctx,"仅提交",Fn("ai_commit"),(),enabled)
-        .with_key("ai-commit").accessibility_label(shortcut_label(ctx,"仅提交","alloy.ai_commit"))
+    let primary=button(ctx,"Commit",Fn("ai_commit"),(),enabled)
+        .with_key("ai-commit").accessibility_label(shortcut_label(ctx,"Commit","alloy.ai_commit"))
         .with_style(style().height(px(28)).padding_y(px(4)).flex_shrink(false).border(px(1)).border_color(theme_color("accent")).background(theme_color("accent")).text_color(theme_color("on_accent")).hover(style().background(theme_color("accent_hover"))));
-    let push=button(ctx,"提交并 Push",Fn("ai_commit_push"),(),enabled)
-        .with_key("ai-commit-push").accessibility_label(shortcut_label(ctx,"提交并 Push","alloy.ai_commit_push"))
+    let push=button(ctx,"Commit and Push",Fn("ai_commit_push"),(),enabled)
+        .with_key("ai-commit-push").accessibility_label(shortcut_label(ctx,"Commit and Push","alloy.ai_commit_push"))
         .with_style(style().height(px(28)).padding_y(px(4)).flex_shrink(false).border(px(1)).border_color(theme_color("border")));
-    let tag=button(ctx,"提交 Push 并打 Tag",Fn("ai_commit_tag"),(),enabled)
-        .with_key("ai-commit-tag").accessibility_label(shortcut_label(ctx,"提交 Push 并打 Tag","alloy.ai_commit_tag"))
+    let tag=button(ctx,"Commit, Push & Tag",Fn("ai_commit_tag"),(),enabled)
+        .with_key("ai-commit-tag").accessibility_label(shortcut_label(ctx,"Commit, Push & Tag","alloy.ai_commit_tag"))
         .with_style(style().height(px(28)).padding_y(px(4)).flex_shrink(false).border(px(1)).border_color(theme_color("border")));
     row([primary,push,tag]).with_key("commit-actions").with_style(style().gap(px(4)).items_center())
 }

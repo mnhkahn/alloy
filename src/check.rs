@@ -947,7 +947,7 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
         assert_eq!(button.handler("click").and_then(UiEventHandler::as_script).unwrap().name(), handler);
     }
     let actions = node_with_key(tree, "commit-actions").unwrap();
-    for label in ["仅提交", "提交并 Push", "提交 Push 并打 Tag"] {
+    for label in ["Commit", "Commit and Push", "Commit, Push & Tag"] {
         assert_eq!(text_occurrences(actions, label), 1);
     }
     assert!(node_with_key(tree, "ai-commit-more").is_none());
