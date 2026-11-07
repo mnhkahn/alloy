@@ -42,6 +42,7 @@ fn state_schema() { #{ fields: #{
     focus_editor_id: #{ schema: #{ type: "ui_value" }, "default": #{ type: "integer", value: 0 } },
     shortcuts: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
     advanced: bool_field(false), image_actual: bool_field(false),
+    audio_status: #{schema:#{type:"ui_value"}, "default":#{type:"null"}},
     partial: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
     included: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
     collapsed: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
@@ -56,7 +57,6 @@ fn state_schema() { #{ fields: #{
     operation_error: string_field(""),
     sensitive_review: #{schema:#{type:"ui_value"}, "default":#{type:"null"}},
     busy: bool_field(false), ai_running: bool_field(false), editor: bool_field(false), base_view: bool_field(false),
-    commit_menu_open: bool_field(false), commit_menu_active: string_field("tag"),
     snapshot: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
     doc: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } }
 } } }
@@ -88,7 +88,10 @@ fn commit_selection(snapshot) {
 fn loaded(ctx, result) {
     let prior=ctx.get_state("snapshot");
     let entering_merge=result.snapshot != () && result.snapshot.merging && (prior==() || !prior.merging);
-    if "document" in result { result.document = prepare_images(ctx, result.document); }
+    if "document" in result {
+        result.document = prepare_images(ctx, result.document);
+        if !ctx.get_state("log_mode") {audio_sync(ctx,result.document);}
+    }
     if !ctx.get_state("ai_running") {ctx.set_state("busy", false);}
     status(ctx, result.message);
     if !result.ok {ctx.set_state("operation_error",result.message);}
@@ -183,6 +186,7 @@ fn watch_blocked(ctx) {ctx.get_state("busy") || ctx.get_state("selecting") || di
 fn watch_tick(ctx,payload) {
  ctx.set_state("watch_tick_id",ctx.get_state("watch_tick_id")+1);
  awake_update(ctx,ctx.call_capability("alloy.awake","status",()));
+ ctx.set_state("audio_status",ctx.call_capability("alloy.audio","status",()));
  sync_update_guard(ctx);
  if ctx.get_state("watch_tick_id") % 12 == 1 {refresh_project_summaries(ctx,());}
  if ctx.get_state("acp_page_open") {return;}
@@ -237,7 +241,7 @@ fn hide_sidebar(ctx,payload) {ctx.set_state("sidebar_visible",false); focus_diff
 fn focus_diff(ctx,payload) { let d=ctx.get_state("doc"); if d != () && d.images == () && d.note == "" { try {ctx.focus("active-diff");} catch (ignored) {} } }
 fn edit_focus(ctx,payload) {let d=ctx.get_state("doc"); if d != () && d.editable && !ctx.get_state("busy") && !ctx.get_state("selecting") {ctx.set_state("editor",true);ctx.set_state("focus_editor_id",ctx.get_state("focus_editor_id")+1);} }
 fn diff_settings(ctx,payload) { let d=ctx.get_state("doc"); if d != () && d.images == () {ctx.set_state("mode_open",true);} }
-fn escape_action(ctx,payload) {ctx.set_state("palette","");ctx.set_state("confirm","");ctx.set_state("projects_open",false);ctx.set_state("commit_menu_open",false);ctx.set_state("mode_open",false);ctx.set_state("whitespace_open",false);ctx.set_state("add_project",false);focus_diff(ctx,());}
+fn escape_action(ctx,payload) {ctx.set_state("palette","");ctx.set_state("confirm","");ctx.set_state("projects_open",false);ctx.set_state("mode_open",false);ctx.set_state("whitespace_open",false);ctx.set_state("add_project",false);focus_diff(ctx,());}
 fn push_prompt(ctx,payload) {
     if !guard(ctx) || ctx.get_state("snapshot")==() {return;}
     watch_invalidate(ctx);ctx.set_state("confirm","");ctx.set_state("busy",true);sync_update_guard(ctx);status(ctx,"Push…");
@@ -257,13 +261,10 @@ fn sensitive_commit_now(ctx,payload) {
     if review==() || s==() || review.root!=s.root {return;}
     if guard(ctx) {ctx.set_state("confirm","");ctx.set_state("sensitive_review",());request(ctx,"ai_commit",#{confirmed_tree:review.tree,after_commit:if "after_commit" in review {review.after_commit} else {"commit"},push_tag:if "push_tag" in review {review.push_tag} else {false}});}
 }
-fn ai_commit_action(ctx,action) {if guard(ctx) && ctx.get_state("snapshot") != () {ctx.set_state("commit_menu_open",false);request(ctx,"ai_commit",#{after_commit:action,push_tag:action=="tag"});}}
+fn ai_commit_action(ctx,action) {if guard(ctx) && ctx.get_state("snapshot") != () {request(ctx,"ai_commit",#{after_commit:action,push_tag:action=="tag"});}}
 fn ai_commit(ctx,payload) {ai_commit_action(ctx,"commit");}
 fn ai_commit_push(ctx,payload) {ai_commit_action(ctx,"push");}
 fn ai_commit_tag(ctx,payload) {ai_commit_action(ctx,"tag");}
-fn commit_menu_open_changed(ctx,open) {ctx.set_state("commit_menu_open",open);}
-fn commit_menu_active_changed(ctx,value) {ctx.set_state("commit_menu_active",value);}
-fn commit_menu_action(ctx,value) {if ["commit","push","tag"].contains(value) {ai_commit_action(ctx,value);}}
 fn palette_open(ctx,mode) {ctx.set_state("palette_query","");ctx.set_state("palette",mode);}
 fn find_action(ctx,payload) {palette_open(ctx,"actions");}
 fn vcs_actions(ctx,payload) {palette_open(ctx,"vcs");}
@@ -435,6 +436,7 @@ fn project_pointer(root,ctx,event) {
     if event.button=="left" {project_choose(ctx,root);}
 }
 fn project_choose(ctx, root) {
+    audio_stop(ctx);
     if !guard(ctx) { return; }
     let s = ctx.get_state("snapshot");
     ctx.set_state("projects_open",false);
@@ -492,6 +494,7 @@ fn select_file(ctx, path, staged) {
     load_selection(ctx,path,staged);
 }
 fn load_selection(ctx,path,staged) {
+    audio_stop(ctx);
     let old_path = "";
     for file in ctx.get_state("snapshot").files { if file.path == path { old_path = file.old_path; } }
     let id = ctx.get_state("selection_id") + 1;
@@ -615,6 +618,31 @@ fn navigation_button(ctx,label,handler,payload,enabled) {
 }
 fn tab(ctx, label, value) {
     navigation_button(ctx,label,Fn("set_tab"),value,true).with_style(style().background(if ctx.get_state("tab") == value {theme_color("selection")} else {theme_color("surface_raised")}))
+}
+fn audio_sync(ctx,d) {
+    let player=ctx.call_capability("alloy.audio","status",());
+    if player.asset=="" {return;}
+    if d!=() && "audio" in d && d.audio!=() {
+        for side in ["left","right"] {let preview=d.audio[side];if preview!=() && preview.asset==player.asset {return;}}
+    }
+    audio_stop(ctx);
+}
+fn audio_stop(ctx) { ctx.set_state("audio_status",ctx.call_capability("alloy.audio","stop",())); }
+fn audio_toggle(ctx,asset) { try {ctx.set_state("audio_status",ctx.call_capability("alloy.audio","toggle",asset));} catch(error) {failed(ctx,error);} }
+fn audio_restart(ctx,asset) { try {ctx.set_state("audio_status",ctx.call_capability("alloy.audio","restart",asset));} catch(error) {failed(ctx,error);} }
+fn audio_time(seconds) {let n=seconds.to_int();let rest=n%60;`${n/60}:${if rest<10 {"0"} else {""}}${rest}`}
+fn audio_pane(ctx,preview,label) {
+    let nodes=[text(label).with_style(style().padding(px(8)).background(theme_color("surface_raised")))];
+    if preview==() {nodes.push(small("No audio in this version"));}
+    else if preview.error!="" {nodes.push(text(preview.error).with_style(style().padding(px(16)).text_color(theme_color("warning"))));}
+    else {
+        let player=ctx.get_state("audio_status");
+        if player==() {player=#{asset:"",playing:false,position:0.0,duration:0.0};}
+        let active=player.asset==preview.asset;
+        nodes.push(small(`${preview.format} · ${preview.bytes/1024} KB`));
+        nodes.push(row([button(ctx,if active && player.playing {"Pause"} else {"Play"},Fn("audio_toggle"),preview.asset,true),button(ctx,"Restart",Fn("audio_restart"),preview.asset,true),small(if active {`${audio_time(player.position)} / ${audio_time(player.duration)}`} else {"Ready to play"})]).with_style(style().gap(px(8)).items_center()));
+    }
+    column(nodes).with_style(style().flex_basis(px(0)).flex_grow().min_width(px(0)).padding(px(12)).gap(px(12)))
 }
 fn image_zoom(ctx, payload) { ctx.set_state("image_actual", !ctx.get_state("image_actual")); }
 fn image_pane(ctx, key, preview, label, single) {
@@ -803,19 +831,18 @@ fn sidebar_group(ctx,group,count,total,mixed,folded,paths,merging) {
 }
 
 fn commit_actions(ctx,enabled) {
-    let primary=button(ctx,shortcut_label(ctx,"Commit","alloy.ai_commit"),Fn("ai_commit"),(),enabled)
-        .with_key("ai-commit").with_style(style().height(px(28)).padding_y(px(4)).border(px(1)).border_color(theme_color("accent")).background(theme_color("accent")).text_color(theme_color("on_accent")).hover(style().background(theme_color("accent_hover"))));
-    let push=button(ctx,"Commit and Push",Fn("ai_commit_push"),(),enabled)
-        .with_key("ai-commit-push").with_style(style().height(px(26)).padding_y(px(4)));
-    let arrow=text("▾").with_key("ai-commit-more").accessibility_role("button").accessibility_label("More commit actions").tab_index(0).disabled(!enabled || ctx.get_state("busy"))
-        .with_style(style().height(px(26)).padding_x(px(7)).padding_y(px(4)).font_size(px(12)).line_height(px(18)).border_left(px(1)).border_color(theme_color("border")).background(theme_color("surface_raised")).hover(style().background(theme_color("surface_hover"))).disabled(style().opacity(0.4)));
-    let dropdown=menu::Menu(#{key:"ai-commit-menu",label:"Commit actions",trigger:arrow,open:ctx.get_state("commit_menu_open"),active_value:ctx.get_state("commit_menu_active"),placement:"top",items:[
-        #{kind:"item",value:"commit",label:"Commit",shortcut:shortcut_key(ctx,"alloy.ai_commit"),disabled:!enabled || ctx.get_state("busy")},
-        #{kind:"item",value:"push",label:"Commit and Push",shortcut:shortcut_key(ctx,"alloy.ai_commit_push"),disabled:!enabled || ctx.get_state("busy")},
-        #{kind:"item",value:"tag",label:"Commit, Push & Tag",shortcut:shortcut_key(ctx,"alloy.ai_commit_tag"),disabled:!enabled || ctx.get_state("busy")}
-    ],on_open_change:Fn("commit_menu_open_changed"),on_active_change:Fn("commit_menu_active_changed"),on_action:Fn("commit_menu_action"),part_styles:#{content:style().width(px(310))}}).disabled(!enabled || ctx.get_state("busy"));
-    row([primary,row([push,dropdown]).with_style(style().gap(px(0)).items_center().border(px(1)).border_color(theme_color("border")).radius(px(3)))]).with_key("commit-actions").with_style(style().gap(px(8)).items_center())
+    let primary=button(ctx,"仅提交",Fn("ai_commit"),(),enabled)
+        .with_key("ai-commit").accessibility_label(shortcut_label(ctx,"仅提交","alloy.ai_commit"))
+        .with_style(style().height(px(28)).padding_y(px(4)).flex_shrink(false).border(px(1)).border_color(theme_color("accent")).background(theme_color("accent")).text_color(theme_color("on_accent")).hover(style().background(theme_color("accent_hover"))));
+    let push=button(ctx,"提交并 Push",Fn("ai_commit_push"),(),enabled)
+        .with_key("ai-commit-push").accessibility_label(shortcut_label(ctx,"提交并 Push","alloy.ai_commit_push"))
+        .with_style(style().height(px(28)).padding_y(px(4)).flex_shrink(false).border(px(1)).border_color(theme_color("border")));
+    let tag=button(ctx,"提交 Push 并打 Tag",Fn("ai_commit_tag"),(),enabled)
+        .with_key("ai-commit-tag").accessibility_label(shortcut_label(ctx,"提交 Push 并打 Tag","alloy.ai_commit_tag"))
+        .with_style(style().height(px(28)).padding_y(px(4)).flex_shrink(false).border(px(1)).border_color(theme_color("border")));
+    row([primary,push,tag]).with_key("commit-actions").with_style(style().gap(px(4)).items_center())
 }
+
 fn sidebar(ctx,s) {
     let virtualized=virtualize_files(s);
     let items = []; let checked = inclusion(ctx); let partial = partials(ctx); let groups = ctx.get_state("collapsed");
@@ -899,6 +926,7 @@ fn content(ctx) {
         select::Select(#{key:"whitespace",label:"Whitespace comparison",options:[#{value:"exact",label:"Do not ignore"},#{value:"ignore_changes",label:"Ignore changes"},#{value:"ignore_all",label:"Ignore all spaces"}],value:ctx.get_state("whitespace"),open:ctx.get_state("whitespace_open"),query:"",empty_text:"No options",size:"xs",width:px(156),on_change:Fn("whitespace_change"),on_open_change:Fn("whitespace_open")})
     ];
     toolbar.push(navigation_button(ctx,if ctx.get_state("hide_unchanged") {"Show all lines"} else {"Hide unchanged"},Fn("toggle_unchanged"),(),true));
+    if "audio" in d && d.audio != () { toolbar = [navigation_button(ctx,"←",Fn("previous_file"),(),true),navigation_button(ctx,"→",Fn("next_file"),(),true),small("Audio preview")]; }
     if d.images != () { toolbar = [navigation_button(ctx,"←",Fn("previous_file"),(),true),navigation_button(ctx,"→",Fn("next_file"),(),true),small("Image preview"),navigation_button(ctx,if ctx.get_state("image_actual") {"Reduced size"} else {"Actual size (100%)"},Fn("image_zoom"),(),true)]; }
     if d.conflict {toolbar=[navigation_button(ctx,"←",Fn("previous_file"),(),true),navigation_button(ctx,"→",Fn("next_file"),(),true),small("Merge conflict · edit the center result")];}
     if dirty(ctx) { toolbar.push(button(ctx,"Save",Fn("save"),(),d.editable)); toolbar.push(button(ctx,"Discard",Fn("discard"),(),true)); }
@@ -913,6 +941,12 @@ fn content(ctx) {
         if !d.added { panes.push(image_pane(ctx,`image-left-${d.path}`,d.images.left,"HEAD",false)); }
         panes.push(image_pane(ctx,`image-right-${d.path}`,d.images.right,if d.staged {"Staged version"} else {"Current version"},d.added));
         children.push(row(panes).with_style(style().flex_grow().min_width(px(0)).min_height(px(0)).gap(px(1))));
+    }
+    else if "audio" in d && d.audio != () {
+        let panes=[];
+        if !d.added {panes.push(audio_pane(ctx,d.audio.left,"HEAD"));}
+        panes.push(audio_pane(ctx,d.audio.right,if d.staged {"Staged version"} else {"Current version"}));
+        children.push(row(panes).with_style(style().flex_grow().min_width(px(0)).min_height(px(0))));
     }
     else if d.note != "" { children.push(text(d.note).with_style(style().padding(px(24)).text_color(theme_color("warning")))); }
     else if d.conflict {
@@ -1013,6 +1047,7 @@ fn acp_config_page(ctx) {
     ]).with_style(style().flex_grow().overflow_y_scroll().padding(px(28)).gap(px(12)).background(theme_color("surface")))
 }
 fn history_request(ctx,op,extra) {
+    audio_stop(ctx);
     if ctx.get_state("busy") || ctx.get_state("selecting") {return;}
     let s=ctx.get_state("snapshot");if s==() {return;}
     watch_invalidate(ctx);
@@ -1024,7 +1059,7 @@ fn history_failed(ctx,error) {ctx.set_state("busy",false);status(ctx,`${error}`)
 fn history_commits(ctx) {let value=ctx.get_state("history_commits");if value==() {[]} else {value}}
 fn history_toggle(ctx,payload) {
     if !guard(ctx) || ctx.get_state("snapshot")==() {return;}
-    watch_invalidate(ctx);ctx.set_state("log_mode",!ctx.get_state("log_mode"));
+    watch_invalidate(ctx);audio_stop(ctx);ctx.set_state("log_mode",!ctx.get_state("log_mode"));
     if ctx.get_state("log_mode") {history_request(ctx,"history",#{skip:0});}
 }
 fn history_more(ctx,payload) {history_request(ctx,"history",#{skip:history_commits(ctx).len()});}
@@ -1062,7 +1097,7 @@ fn history_show_diff(ctx,path) {
     history_request(ctx,"history_diff",#{commit_id:ctx.get_state("history_selected"),path:path});
 }
 fn history_diff_selected(ctx,payload) {history_show_diff(ctx,ctx.get_state("history_file"));}
-fn history_close_diff(ctx,payload) {if !ctx.get_state("busy") {ctx.set_state("history_doc",());}}
+fn history_close_diff(ctx,payload) {if !ctx.get_state("busy") {audio_stop(ctx);ctx.set_state("history_doc",());}}
 fn history_panel(ctx,s) {
     let rows=[];
     for commit in history_commits(ctx) {
@@ -1110,6 +1145,7 @@ fn history_diff_view(ctx) {
     let old_path="";for file in details.files {if file.path==d.path {old_path=file.old_path;}}
     let nodes=[row([text(`Diff · ${file_name(d.path)}`).with_style(style().flex_grow().min_width(px(0)).text_ellipsis().overflow_hidden()),select::Select(#{key:"history-diff-mode",label:"Diff layout",options:[#{value:"split",label:"Side-by-side viewer"},#{value:"unified",label:"Unified viewer"}],value:ctx.get_state("mode"),open:ctx.get_state("mode_open"),query:"",empty_text:"No diff layouts",size:"xs",width:px(176),on_change:Fn("set_mode"),on_open_change:Fn("mode_open")}),button(ctx,"Close Diff",Fn("history_close_diff"),(),true)]).with_style(style().height(px(34)).flex_shrink(false).padding_x(px(8)).gap(px(8)).items_center().background(theme_color("surface_raised"))),diff_path_bar(ctx,d.path,old_path,"history-diff-path")];
     if d.images!=() {nodes.push(row([image_pane(ctx,`history-left-${right_label}-${d.path}`,d.images.left,left_label,false),image_pane(ctx,`history-right-${right_label}-${d.path}`,d.images.right,right_label,false)]).with_style(style().flex_grow().min_height(px(0)).min_width(px(0))));}
+    else if "audio" in d && d.audio!=() {nodes.push(row([audio_pane(ctx,d.audio.left,left_label),audio_pane(ctx,d.audio.right,right_label)]).with_style(style().flex_grow().min_width(px(0))));}
     else if d.note!="" {nodes.push(text(d.note).with_style(style().padding(px(12))));}
     else {nodes.push(diff::DiffViewer(#{key:`history-diff-${right_label}-${d.path}`,left:#{source:d.left,label:left_label,file_name:d.path},right:#{source:d.right,label:right_label,file_name:d.path},mode:ctx.get_state("mode"),context_lines:3,whitespace:"exact",show_hunk_controls:false}).with_style(style().flex_grow().min_height(px(0)).min_width(px(0))));}
     column(nodes).with_key("history-diff").with_style(style().flex_grow().min_height(px(0)).min_width(px(0)))

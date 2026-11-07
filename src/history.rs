@@ -214,6 +214,7 @@ pub fn diff(repo: &Repository, id: &str, path: &str) -> Result<Document> {
         exists: change.status != "D",
         editable: false,
         images: None,
+        audio: None,
         left: String::new(),
         right: String::new(),
         base: String::new(),
@@ -230,6 +231,13 @@ pub fn diff(repo: &Repository, id: &str, path: &str) -> Result<Document> {
         index_source: None,
         staged_hunks: None,
     };
+    if doc.note.is_empty() && crate::audio::supported_path(path) {
+        doc.audio = Some(crate::audio::AudioComparison {
+            left: if change.status == "A" { None } else { Some(crate::audio::prepare(path, &left)) },
+            right: if change.status == "D" { None } else { Some(crate::audio::prepare(path, &right)) },
+        });
+        return Ok(doc);
+    }
     if doc.note.is_empty()
         && (crate::preview::supported_path(path)
             || crate::preview::has_image_signature(&left)

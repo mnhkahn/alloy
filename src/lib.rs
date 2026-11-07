@@ -1,4 +1,5 @@
 pub mod acp;
+pub mod audio;
 pub mod awake;
 pub mod cmsg;
 pub mod commit;

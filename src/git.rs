@@ -125,6 +125,8 @@ pub struct Document {
     pub path: String,
     pub added: bool,
     pub images: Option<crate::preview::ImageComparison>,
+    #[serde(default)]
+    pub audio: Option<crate::audio::AudioComparison>,
     pub left: String,
     pub right: String,
     pub base: String,
@@ -324,7 +326,10 @@ impl Repository {
                 .map_err(err)?;
             let is_image = crate::preview::supported_path(path)
                 || crate::preview::has_image_signature(&prefix[..count]);
-            let limit = if is_image {
+            let is_audio = crate::audio::supported_path(path);
+            let limit = if is_audio {
+                crate::audio::MAX_AUDIO_BYTES
+            } else if is_image {
                 crate::preview::MAX_IMAGE_BYTES
             } else {
                 MAX_TEXT
@@ -335,7 +340,9 @@ impl Repository {
                     exists,
                     conflict,
                     staged,
-                    if is_image {
+                    if is_audio {
+                        "Audio exceeds the 32 MiB preview limit."
+                    } else if is_image {
                         "Image exceeds the 32 MiB preview limit."
                     } else {
                         "Text file exceeds the 750 KB editor limit; content is not truncated. Use an external editor."
@@ -344,6 +351,15 @@ impl Repository {
             }
             fs::read(&full).map_err(err)?
         };
+        if !special && !conflict && crate::audio::supported_path(path) {
+            let mut document = uneditable(path, exists, false, staged, "");
+            document.added = entry.index == "?" || ((head || staged) && entry.index == "A");
+            document.audio = Some(crate::audio::AudioComparison {
+                left: if left.is_empty() { None } else { Some(crate::audio::prepare(path, &left)) },
+                right: if right.is_empty() && (if staged { entry.index == "D" } else { !exists }) { None } else { Some(crate::audio::prepare(path, &right)) },
+            });
+            return Ok(document);
+        }
         if !special
             && !conflict
             && (crate::preview::supported_path(path)
@@ -417,6 +433,7 @@ impl Repository {
             path: path.into(),
             added: entry.index == "?" || ((head || staged) && entry.index == "A"),
             images: None,
+            audio: None,
             left,
             right,
             base: text(base)?,
@@ -1186,6 +1203,7 @@ fn uneditable(path: &str, exists: bool, conflict: bool, staged: bool, note: &str
         path: path.into(),
         added: false,
         images: None,
+        audio: None,
         left: String::new(),
         right: String::new(),
         base: String::new(),

@@ -23,6 +23,14 @@ impl ScriptViewExtension for GitExtension {
     fn configure_runtime(&self, runtime: &mut UiRuntimeState) -> Result<(), String> {
         runtime.capabilities.register(
             CapabilityDescriptor {
+                id: CapabilityId::parse("alloy.audio").map_err(|e| e.to_string())?,
+                version: semver::Version::new(1, 0, 0),
+                methods: ["status", "toggle", "restart", "stop"].into_iter().map(|name| (name.into(), CapabilityMethod { input: ValueSchema::UiValue, output: ValueSchema::UiValue })).collect(),
+            },
+            crate::audio_player::AudioPlayer::default(),
+        ).map_err(|e| e.to_string())?;
+        runtime.capabilities.register(
+            CapabilityDescriptor {
                 id: CapabilityId::parse("alloy.awake").map_err(|e| e.to_string())?,
                 version: semver::Version::new(1, 0, 0),
                 methods: BTreeMap::from([
@@ -571,7 +579,10 @@ pub(crate) fn to_ui(value: Value) -> UiValue {
     match value {
         Value::Null => UiValue::Null,
         Value::Bool(v) => UiValue::Bool(v),
-        Value::Number(v) => UiValue::Integer(v.as_i64().unwrap_or(0)),
+        Value::Number(v) => match v.as_i64() {
+            Some(n) => UiValue::Integer(n),
+            None => UiValue::Float(v.as_f64().unwrap_or(0.0)),
+        },
         Value::String(v) => UiValue::String(v),
         Value::Array(v) => UiValue::Array(v.into_iter().map(to_ui).collect()),
         Value::Object(v) => UiValue::Map(v.into_iter().map(|(k, v)| (k, to_ui(v))).collect()),

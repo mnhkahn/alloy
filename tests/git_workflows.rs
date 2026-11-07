@@ -1567,3 +1567,55 @@ fn sensitive_commit_approval_is_limited_to_reviewed_staged_content() {
     assert!(alloy::cmsg::prepare_confirmed(&repo, Some(&fresh_token)).is_ok());
     assert_ne!(token, fresh_token);
 }
+
+#[test]
+fn audio_previews_preserve_worktree_index_history_and_deletion_versions() {
+    let (_dir, repo) = fixture();
+    let path = "试听.MP3";
+    let original = b"ID3\0original audio bytes";
+    let staged = b"ID3\0staged audio bytes";
+    let working = b"ID3\0working audio bytes";
+    fs::write(repo.root.join(path), original).unwrap();
+    let added = repo.document(path, false).unwrap();
+    assert!(added.added && !added.editable);
+    assert!(added.audio.unwrap().left.is_none());
+    repo.stage(path).unwrap();
+    repo.commit("audio").unwrap();
+    let first = repo.head_sha().unwrap();
+    fs::write(repo.root.join(path), staged).unwrap();
+    repo.stage(path).unwrap();
+    fs::write(repo.root.join(path), working).unwrap();
+    for (is_staged, left, right) in [(false, staged.as_slice(), working.as_slice()), (true, original.as_slice(), staged.as_slice())] {
+        let doc = repo.document(path, is_staged).unwrap();
+        assert!(!doc.editable && doc.images.is_none() && doc.right.is_empty());
+        let audio = doc.audio.unwrap();
+        for (preview, expected) in [(audio.left.unwrap(), left), (audio.right.unwrap(), right)] {
+            assert!(preview.error.is_empty());
+            assert_eq!(alloy::preview::load_asset(&preview.asset).unwrap().1, expected);
+        }
+    }
+    let doc = alloy::history::diff(&repo, &first, path).unwrap();
+    let audio = doc.audio.unwrap();
+    assert!(audio.left.is_none());
+    assert_eq!(alloy::preview::load_asset(&audio.right.unwrap().asset).unwrap().1, original);
+    fs::remove_file(repo.root.join(path)).unwrap();
+    let deleted = repo.document(path, false).unwrap().audio.unwrap();
+    assert!(deleted.left.is_some() && deleted.right.is_none());
+    repo.stage(path).unwrap();
+    repo.commit("delete audio").unwrap();
+    let deleted = alloy::history::diff(&repo, &repo.head_sha().unwrap(), path).unwrap().audio.unwrap();
+    assert!(deleted.left.is_some() && deleted.right.is_none());
+}
+
+#[test]
+fn audio_uses_media_limit_instead_of_text_limit() {
+    let (_dir, repo) = fixture();
+    let path = "large.wav";
+    fs::write(repo.root.join(path), vec![0; 800_000]).unwrap();
+    assert!(repo.document(path, false).unwrap().audio.is_some());
+    let file = fs::File::create(repo.root.join(path)).unwrap();
+    file.set_len(alloy::audio::MAX_AUDIO_BYTES as u64 + 1).unwrap();
+    let doc = repo.document(path, false).unwrap();
+    assert!(doc.audio.is_none() && doc.note.contains("Audio exceeds"));
+    assert!(!alloy::audio::prepare(path, &[]).error.is_empty());
+}

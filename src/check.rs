@@ -58,6 +58,8 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
         .map_err(error)?
         .with_capability("alloy.awake", "*")
         .map_err(error)?
+        .with_capability("alloy.audio", "*")
+        .map_err(error)?
         .with_capability("alloy.git", "*")
         .map_err(error)?
         .activate(&mut runtime.capabilities)
@@ -940,19 +942,38 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
     invoke(&engine, &mut life, "loaded", selection_reply(changed, None))?;
     assert_eq!(get("commit"), UiValue::String(String::new()), "project restore must reject a message for an older selection");
     let tree = life.render(&mut engine).map_err(error)?;
-    for (key, handler) in [("ai-commit", "ai_commit"), ("ai-commit-push", "ai_commit_push")] {
-        let button = node_with_key(tree, key).expect("the primary and secondary commit buttons must be visible");
+    for (key, handler) in [("ai-commit", "ai_commit"), ("ai-commit-push", "ai_commit_push"), ("ai-commit-tag", "ai_commit_tag")] {
+        let button = node_with_key(tree, key).expect("all three commit buttons must be visible");
         assert_eq!(button.handler("click").and_then(UiEventHandler::as_script).unwrap().name(), handler);
     }
-    assert!(node_with_key(tree, "ai-commit-more").is_some());
-    invoke(&engine, &mut life, "commit_menu_open_changed", UiValue::Bool(true))?;
-    let tree = life.render(&mut engine).map_err(error)?;
-    let menu = node_with_key(tree, "ai-commit-menu-content").expect("commit dropdown must open");
-    for label in ["Commit", "Commit and Push", "Commit, Push & Tag", "⌘K", "⌘⌥K", "⌘⌥⇧K"] {
-        assert_eq!(text_occurrences(menu, label), 1, "dropdown must show each action and its shortcut");
+    let actions = node_with_key(tree, "commit-actions").unwrap();
+    for label in ["仅提交", "提交并 Push", "提交 Push 并打 Tag"] {
+        assert_eq!(text_occurrences(actions, label), 1);
     }
-    invoke(&engine, &mut life, "escape_action", UiValue::Null)?;
-    assert_eq!(get("commit_menu_open"), UiValue::Bool(false));
+    assert!(node_with_key(tree, "ai-commit-more").is_none());
+    // Audio uses native controls instead of the text editor, including deleted versions.
+    let saved_doc = get("doc");
+    let saved_draft = get("draft");
+    let saved_audio = get("audio_status");
+    let audio = serde_json::json!({"asset":"audio-ui-fixture","bytes":4096,"format":"MP3","error":""});
+    for (left, right, expected_controls) in [(serde_json::Value::Null, audio.clone(), 1), (audio.clone(), audio.clone(), 2), (audio.clone(), serde_json::Value::Null, 1)] {
+        let doc = serde_json::json!({"path":"sample.mp3","added":false,"images":null,"audio":{"left":left,"right":right},"left":"","right":"","base":"","ours":"","theirs":"","exists":true,"editable":false,"note":"","conflict":false,"staged":false,"hunks":[],"index_source":null,"staged_hunks":null});
+        runtime.borrow_mut().component_state.set(&state_path,"doc",crate::bridge::to_ui(doc)).map_err(error)?;
+        runtime.borrow_mut().component_state.set(&state_path,"draft",UiValue::String(String::new())).map_err(error)?;
+        let tree = life.render(&mut engine).map_err(error)?;
+        assert_eq!(text_occurrences(tree,"Audio preview"),1);
+        assert_eq!(text_occurrences(tree,"Play"),expected_controls);
+        assert_eq!(text_occurrences(tree,"Restart"),expected_controls);
+    }
+    for playing in [true, false] {
+        runtime.borrow_mut().component_state.set(&state_path,"audio_status",crate::bridge::to_ui(serde_json::json!({"asset":"audio-ui-fixture","playing":playing,"position":65.0,"duration":125.0}))).map_err(error)?;
+        let tree=life.render(&mut engine).map_err(error)?;
+        assert_eq!(text_occurrences(tree,if playing {"Pause"} else {"Play"}),1);
+        assert_eq!(text_occurrences(tree,"1:05 / 2:05"),1);
+    }
+    runtime.borrow_mut().component_state.set(&state_path,"audio_status",saved_audio).map_err(error)?;
+    runtime.borrow_mut().component_state.set(&state_path,"doc",saved_doc).map_err(error)?;
+    runtime.borrow_mut().component_state.set(&state_path,"draft",saved_draft).map_err(error)?;
     if exercise_large_project {
         // Cover the reported 177-file workspace and the virtualization boundary.
         // Exercise the realized filename's click handler, not just its data.

@@ -54,8 +54,8 @@ pub fn load_asset(key: &str) -> Result<(String, Vec<u8>), String> {
     let index = cache
         .iter()
         .position(|v| v.key == key)
-        .ok_or("Image preview expired; select the file again.")?;
-    let entry = cache.remove(index).ok_or("Image preview expired")?;
+        .ok_or("Preview expired; select the file again.")?;
+    let entry = cache.remove(index).ok_or("Preview expired")?;
     let result = (entry.mime.clone(), entry.bytes.clone());
     cache.push_back(entry);
     Ok(result)
@@ -129,4 +129,17 @@ fn prepare_inner(bytes: &[u8]) -> Result<ImagePreview, String> {
         format: name.into(),
         error: String::new(),
     })
+}
+
+/// Store original audio bytes separately from image decoding.
+pub(crate) fn cache_audio(bytes: &[u8]) -> Result<String, String> {
+    let key = format!("audio-{:x}", Sha256::digest(bytes));
+    let mut cache = cache().lock().map_err(|e| e.to_string())?;
+    if !cache.iter().any(|v| v.key == key) {
+        while cache.iter().map(|v| v.bytes.len()).sum::<usize>() + bytes.len() > CACHE_BYTES {
+            cache.pop_front();
+        }
+        cache.push_back(Cached { key: key.clone(), mime: "application/octet-stream".into(), bytes: bytes.to_vec() });
+    }
+    Ok(key)
 }

@@ -1,3 +1,4 @@
+mod audio_player;
 mod app_icon;
 mod bridge;
 mod check;
@@ -61,6 +62,8 @@ fn prepare(
         .with_capability("alloy.update", "*")
         .unwrap()
         .with_capability("alloy.awake", "*")
+        .unwrap()
+        .with_capability("alloy.audio", "*")
         .unwrap()
         .with_capability("alloy.git", "*")
         .unwrap();
