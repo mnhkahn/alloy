@@ -55,6 +55,9 @@ fn state_schema() { #{ fields: #{
     tree_mode: bool_field(false),
     tree_epoch: #{schema:#{type:"integer"}, "default":#{type:"integer",value:0}},
     tree_folders: #{schema:#{type:"ui_value"}, "default":#{type:"null"}},
+    tree_preview_id: #{schema:#{type:"integer"}, "default":#{type:"integer",value:0}},
+    tree_file: string_field(""), tree_preview_error: string_field(""),
+    tree_document: #{schema:#{type:"ui_value"}, "default":#{type:"null"}},
     file_menu: string_field(""), rollback_path: string_field(""), delete_path: string_field(""),
     committed_paths: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
     operation_error: string_field(""),
@@ -1164,14 +1167,21 @@ fn history_view(ctx,s) {column([history_diff_view(ctx),history_panel(ctx,s)]).wi
 fn tree_reset(ctx) {
     ctx.set_state("tree_epoch",ctx.get_state("tree_epoch")+1);
     ctx.set_state("tree_folders",#{});
+    ctx.set_state("tree_preview_id",ctx.get_state("tree_preview_id")+1);
+    ctx.set_state("tree_file","");
+    ctx.set_state("tree_document",());
+    ctx.set_state("tree_preview_error","");
 }
 fn tree_close(ctx) {
+    if ctx.get_state("tree_mode") {audio_stop(ctx);}
     ctx.set_state("tree_mode",false);
     tree_reset(ctx);
 }
 fn tree_reload(ctx) {
+    let path=ctx.get_state("tree_file");
     tree_reset(ctx);
     tree_request(ctx,"");
+    if path!="" {tree_open_file(ctx,path);}
 }
 fn tree_toggle(ctx,payload) {
     if ctx.get_state("tree_mode") {tree_close(ctx);return;}
@@ -1205,6 +1215,28 @@ fn tree_expand(ctx,path) {
     folders[path].open=!folders[path].open;
     ctx.set_state("tree_folders",folders);
 }
+fn tree_open_file(ctx,path) {
+    if !ctx.get_state("tree_mode") || path=="" {return;}
+    let id=ctx.get_state("tree_preview_id")+1;
+    audio_stop(ctx);
+    ctx.set_state("tree_preview_id",id);
+    ctx.set_state("tree_file",path);
+    ctx.set_state("tree_document",());
+    ctx.set_state("tree_preview_error","");
+    ctx.start_task("alloy.git","execute",#{op:"tree_preview",root:ctx.get_state("snapshot").root,path:path},
+        Fn("tree_preview_loaded").curry(id),Fn("tree_preview_failed").curry(id));
+}
+fn tree_preview_loaded(id,ctx,result) {
+    if id==ctx.get_state("tree_preview_id") {
+        ctx.set_state("tree_document",prepare_images(ctx,result.document));
+    }
+}
+fn tree_preview_failed(id,ctx,error) {
+    if id==ctx.get_state("tree_preview_id") {
+        ctx.set_state("tree_preview_error",`${error}`);
+    }
+}
+fn tree_open_external(ctx,path) {file_action(path,ctx,"open-file");}
 fn tree_children(folder,path,depth) {
     if folder.loading || folder.error!="" || folder.entries.len()==0 {
         let label=if folder.loading {"Loading…"} else if folder.error!="" {folder.error} else {"Empty folder"};
@@ -1248,8 +1280,36 @@ fn tree_row(ctx,payload) {
         node=node.with_style(style().hover(style().background(theme_color("surface_hover"))))
             .accessibility_role("button").accessibility_label(if item.open {`Collapse ${item.path}`} else {`Expand ${item.path}`})
             .tab_index(0).on_click_value(Fn("tree_expand"),item.path).on_key_value("enter",Fn("tree_expand"),item.path);
+    } else if item.kind=="file" && item.path!="" {
+        let background=if item.path==ctx.get_state("tree_file") {theme_color("selection")} else {theme_color("surface")};
+        node=node.with_style(style().background(background).hover(style().background(theme_color("surface_hover"))))
+            .accessibility_role("button").accessibility_label(`Open ${item.path}`)
+            .tab_index(0).on_click_value(Fn("tree_open_file"),item.path).on_key_value("enter",Fn("tree_open_file"),item.path);
     }
     node
+}
+fn tree_file_view(ctx) {
+    let path=ctx.get_state("tree_file");
+    let d=ctx.get_state("tree_document");
+    let error=ctx.get_state("tree_preview_error");
+    let preview=if path=="" {small("Select a file to view its contents.").with_style(style().padding(px(12)))}
+        else if error!="" {text(error).with_style(style().padding(px(12)).text_color(theme_color("danger")))}
+        else if d==() {small("Loading file…").with_style(style().padding(px(12)))}
+        else if d.note!="" {small(d.note).with_style(style().padding(px(12)))}
+        else if d.images!=() {image_pane(ctx,`tree-image-${path}`,d.images.right,file_name(path),true)}
+        else if d.audio!=() {audio_pane(ctx,d.audio.right,file_name(path))}
+        else if d.right=="" {small("Empty file").with_style(style().padding(px(12)))}
+        else {code::CodeViewer(#{key:`tree-code-${ctx.get_state("tree_preview_id")}`,source:d.right,file_name:path,label:path})
+            .tab_index(0).with_style(style().flex_grow().min_height(px(0)).min_width(px(0)))};
+    let nodes=[];
+    if path!="" {
+        nodes.push(row([
+            text(path).with_style(style().flex_grow().min_width(px(0)).text_ellipsis().overflow_hidden()),
+            button(ctx,"Open Externally",Fn("tree_open_external"),path,true).with_style(style().flex_shrink(false))
+        ]).with_style(style().padding(px(6)).gap(px(8)).items_center().border_bottom(px(1)).border_color(theme_color("border"))));
+    }
+    nodes.push(preview);
+    column(nodes).with_key("tree-file-preview").with_style(style().flex_grow().min_height(px(0)).min_width(px(0)))
 }
 fn tree_view(ctx,s) {
     let folders=ctx.get_state("tree_folders");
@@ -1257,8 +1317,13 @@ fn tree_view(ctx,s) {
     column([
         row([text(`Tree · ${file_name(s.root)}`).with_style(style().font_weight(600)),button(ctx,"Local Changes",Fn("tree_toggle"),(),true)])
             .with_style(style().padding(px(6)).gap(px(8)).items_center().justify_between().border_bottom(px(1)).border_color(theme_color("border"))),
-        virtual_collection(#{key:`tree-list-${s.root}`,label:"Repository directory tree",data:items,estimated_height:26,fill_height:true,overdraw_pixels:104},Fn("tree_row"))
-            .with_key("tree-list").with_style(style().flex_grow().min_height(px(0)))
+        row([
+            column([
+                virtual_collection(#{key:`tree-list-${s.root}`,label:"Repository directory tree",data:items,estimated_height:26,fill_height:true,overdraw_pixels:104},Fn("tree_row"))
+                    .with_key("tree-list").with_style(style().flex_grow().min_height(px(0)).min_width(px(0)))
+            ]).with_style(style().width(px(330)).flex_shrink(false).min_height(px(0)).border_right(px(1)).border_color(theme_color("border"))),
+            tree_file_view(ctx)
+        ]).with_style(style().flex_grow().min_height(px(0)).min_width(px(0)))
     ]).with_key("tree-view").with_style(style().flex_grow().min_height(px(0)).min_width(px(0)))
 }
 

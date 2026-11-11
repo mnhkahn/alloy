@@ -1069,7 +1069,8 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
         let dir = tempfile::tempdir().map_err(error)?;
         alloy::git::run(dir.path(), &["init", "-b", "main"], None)?;
         std::fs::create_dir(dir.path().join("src")).map_err(error)?;
-        std::fs::write(dir.path().join("src/main.rs"), "").map_err(error)?;
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").map_err(error)?;
+        std::fs::write(dir.path().join(".git/info/exclude"), "/src/main.rs\n").map_err(error)?;
         std::fs::write(dir.path().join("README.md"), "").map_err(error)?;
         let repo = alloy::git::Repository::open(dir.path().to_str().unwrap())?;
         #[cfg(unix)]
@@ -1092,7 +1093,7 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
             loop {
                 let deliveries = runtime.borrow_mut().tasks.drain(life.generation());
                 for delivery in deliveries {
-                    if matches!(delivery.callback.name(), "tree_loaded" | "tree_failed") {
+                    if matches!(delivery.callback.name(), "tree_loaded" | "tree_failed" | "tree_preview_loaded" | "tree_preview_failed") {
                         let _ = life.invoke_async_delivery(engine, delivery).map_err(error)?;
                         return Ok(());
                     }
@@ -1135,6 +1136,23 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
         wait_for_tree(&engine, &life)?;
         let tree = life.render(&mut engine).map_err(error)?;
         assert_eq!(keys(tree)[1], "tree-entry-src/main.rs");
+        let UiNodeKind::VirtualCollection { spec } = node_with_key(tree, "tree-list").unwrap().kind() else {
+            unreachable!();
+        };
+        runtime.borrow().virtual_requests.request(spec.id.clone(), [1]);
+        life.realize_virtual_requests(&mut engine).map_err(error)?;
+        let open_file = node_with_key(life.root().unwrap(), "tree-entry-src/main.rs")
+            .unwrap().handler("click").and_then(UiEventHandler::as_script).unwrap().clone();
+        let _ = life.invoke_callback_transactional(
+            &engine, &open_file, UiValue::String("src/main.rs".into())
+        ).map_err(error)?;
+        wait_for_tree(&engine, &life)?;
+        let UiValue::Map(preview) = get("tree_document") else {
+            panic!("Ignored working-tree file did not open: {:?}", get("tree_preview_error"));
+        };
+        assert_eq!(preview["right"], UiValue::String("fn main() {}\n".into()));
+        assert_eq!(get("doc"), UiValue::Null);
+        assert!(node_with_key(life.render(&mut engine).map_err(error)?, "tree-file-preview").is_some());
         invoke(&engine, &mut life, "tree_expand", folder)?;
         assert_eq!(keys(life.render(&mut engine).map_err(error)?), root_keys);
         invoke(&engine, &mut life, "refresh", UiValue::Null)?;

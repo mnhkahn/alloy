@@ -259,6 +259,56 @@ impl Repository {
         }
         Ok(target)
     }
+
+    /// Preview the current file on disk, including files absent from Git status.
+    pub fn working_file_preview(&self, path: &str) -> Result<Document> {
+        let full = self.safe_path(path)?;
+        if !fs::metadata(&full).map_err(err)?.is_file() {
+            return Err("Only regular files can be previewed.".into());
+        }
+        let mut file = fs::File::open(full).map_err(err)?;
+        let mut bytes = Vec::new();
+        (&mut file).take(32).read_to_end(&mut bytes).map_err(err)?;
+        let audio = crate::audio::supported_path(path);
+        let image = crate::preview::supported_path(path)
+            || crate::preview::has_image_signature(&bytes);
+        let limit = if audio {
+            crate::audio::MAX_AUDIO_BYTES
+        } else if image {
+            crate::preview::MAX_IMAGE_BYTES
+        } else {
+            MAX_TEXT
+        };
+        let mut document = uneditable(path, true, false, false, "");
+        if file.metadata().map_err(err)?.len() <= limit as u64 {
+            let remaining = limit + 1 - bytes.len();
+            file.take(remaining as u64).read_to_end(&mut bytes).map_err(err)?;
+        } else {
+            document.note = "This file exceeds the preview size limit.".into();
+            return Ok(document);
+        }
+        if bytes.len() > limit {
+            document.note = "This file exceeds the preview size limit.".into();
+        } else if audio {
+            document.audio = Some(crate::audio::AudioComparison {
+                left: None,
+                right: Some(crate::audio::prepare(path, &bytes)),
+            });
+        } else if image {
+            document.images = Some(crate::preview::ImageComparison {
+                left: None,
+                right: Some(crate::preview::prepare(&bytes)),
+            });
+        } else if bytes.contains(&0) {
+            document.note = "No preview is available for this binary file.".into();
+        } else {
+            match String::from_utf8(bytes) {
+                Ok(source) => document.right = source,
+                Err(_) => document.note = "This file is not UTF-8 and cannot be previewed.".into(),
+            }
+        }
+        Ok(document)
+    }
     pub fn snapshot(&self) -> Result<Snapshot> {
         let bytes = self.bytes(&["status", "--porcelain=v1", "-z", "--untracked-files=all"])?;
         let files = parse_status(&bytes)?;
