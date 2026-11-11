@@ -1065,6 +1065,83 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
         assert_eq!(get("busy"),UiValue::Bool(true),"large projects must allow another project switch");
         invoke(&engine, &mut life,"failed",UiValue::String("Simulated open failure".into()))?;
         assert_eq!(get("busy"),UiValue::Bool(false),"an open failure must permit retry");
+
+        let dir = tempfile::tempdir().map_err(error)?;
+        alloy::git::run(dir.path(), &["init", "-b", "main"], None)?;
+        std::fs::create_dir(dir.path().join("src")).map_err(error)?;
+        std::fs::write(dir.path().join("src/main.rs"), "").map_err(error)?;
+        std::fs::write(dir.path().join("README.md"), "").map_err(error)?;
+        let repo = alloy::git::Repository::open(dir.path().to_str().unwrap())?;
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(".", dir.path().join("loop")).map_err(error)?;
+            assert!(repo.directory_entries("loop").is_err());
+        }
+        assert!(repo.directory_entries(".git").is_err());
+        assert!(repo.directory_entries("..").is_err());
+        invoke(
+            &engine,
+            &mut life,
+            "loaded",
+            crate::bridge::to_ui(serde_json::json!({
+                "ok":true, "message":"Tree check", "snapshot":repo.snapshot()?, "document":null
+            })),
+        )?;
+        let wait_for_tree = |engine: &RuntimeEngine, life: &ScriptLifecycle| -> Result<(), String> {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let deliveries = runtime.borrow_mut().tasks.drain(life.generation());
+                for delivery in deliveries {
+                    if matches!(delivery.callback.name(), "tree_loaded" | "tree_failed") {
+                        let _ = life.invoke_async_delivery(engine, delivery).map_err(error)?;
+                        return Ok(());
+                    }
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err("Timed out reading the repository tree".into());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
+        let tree = life.render(&mut engine).map_err(error)?;
+        let toggle = node_with_key(tree, "repository-tree")
+            .unwrap().handler("click").and_then(UiEventHandler::as_script).unwrap().clone();
+        let _ = life.invoke_callback_transactional(&engine, &toggle, UiValue::Null).map_err(error)?;
+        wait_for_tree(&engine, &life)?;
+        let keys = |tree: &UiNode| {
+            let UiNodeKind::VirtualCollection { spec } = node_with_key(tree, "tree-list").unwrap().kind() else {
+                panic!("repository tree must use a virtual list");
+            };
+            let VirtualCollectionData::Values(rows) = &spec.data else {
+                unreachable!();
+            };
+            rows.iter().map(|row| match row {
+                UiValue::Map(fields) => match &fields["key"] {
+                    UiValue::String(key) => key.clone(),
+                    _ => unreachable!(),
+                },
+                _ => unreachable!(),
+            }).collect::<Vec<_>>()
+        };
+        let tree = life.render(&mut engine).map_err(error)?;
+        let root_keys = keys(tree);
+        assert_eq!(root_keys.first().unwrap(), "tree-entry-src");
+        assert!(root_keys.contains(&"tree-entry-README.md".into()));
+        assert!(!root_keys.contains(&"tree-entry-.git".into()));
+        let expand = node_with_key(tree, "tree-entry-src")
+            .unwrap().handler("click").and_then(UiEventHandler::as_script).unwrap().clone();
+        let folder = UiValue::String("src".into());
+        let _ = life.invoke_callback_transactional(&engine, &expand, folder.clone()).map_err(error)?;
+        wait_for_tree(&engine, &life)?;
+        let tree = life.render(&mut engine).map_err(error)?;
+        assert_eq!(keys(tree)[1], "tree-entry-src/main.rs");
+        invoke(&engine, &mut life, "tree_expand", folder)?;
+        assert_eq!(keys(life.render(&mut engine).map_err(error)?), root_keys);
+        invoke(&engine, &mut life, "refresh", UiValue::Null)?;
+        invoke(&engine, &mut life, "tree_toggle", UiValue::Null)?;
+        wait_for_tree(&engine, &life)?;
+        assert!(!matches!(get("tree_mode"), UiValue::Bool(true)));
+        assert_eq!(get("tree_folders"), UiValue::Map(BTreeMap::new()));
     }
     Ok(())
 }

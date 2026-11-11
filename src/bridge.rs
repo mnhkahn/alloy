@@ -127,7 +127,7 @@ impl AsyncCapabilityHandler for Handler {
             // Read-only summaries must not queue behind ACP or network operations.
             if matches!(
                 string(&data, "op"),
-                "projects" | "project_summaries" | "open_file" | "open_folder"
+                "projects" | "project_summaries" | "open_file" | "open_folder" | "tree"
             ) {
                 return execute(&data, &initial).map(to_ui);
             }
@@ -309,6 +309,9 @@ fn execute(data: &Value, initial: &str) -> Result<Value, String> {
         }
         _ => Repository::open(string(data, "root"))?,
     };
+    if op == "tree" {
+        return Ok(json!({"entries":repo.directory_entries(path)?}));
+    }
     if matches!(op, "open_file" | "open_folder") {
         let target = repo.external_open_path(path, op == "open_folder")?;
         let output = std::process::Command::new("/usr/bin/open")

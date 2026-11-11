@@ -159,6 +159,14 @@ impl Drop for IndexLock {
 pub struct Repository {
     pub root: PathBuf,
 }
+
+#[derive(Serialize)]
+pub struct DirectoryEntry {
+    pub name: String,
+    pub path: String,
+    pub kind: &'static str,
+}
+
 impl Repository {
     pub fn open(path: &str) -> Result<Self> {
         let path = Path::new(path);
@@ -195,6 +203,47 @@ impl Repository {
         }
         Ok(full)
     }
+    /// Read only one level of the working tree so unopened directories cost nothing.
+    pub fn directory_entries(&self, path: &str) -> Result<Vec<DirectoryEntry>> {
+        let directory = if path.is_empty() {
+            self.root.clone()
+        } else {
+            self.safe_path(path)?
+        };
+        let mut entries = Vec::new();
+        for entry in fs::read_dir(&directory)
+            .map_err(|error| format!("Cannot read {}: {error}", directory.display()))?
+        {
+            let entry = entry.map_err(err)?;
+            let name = entry.file_name();
+            if name == ".git" {
+                continue;
+            }
+            let file_type = entry.file_type().map_err(err)?;
+            let kind = if file_type.is_dir() {
+                "folder"
+            } else if file_type.is_symlink() {
+                "link"
+            } else {
+                "file"
+            };
+            let entry_path = entry.path();
+            let relative = entry_path.strip_prefix(&self.root).map_err(err)?;
+            entries.push(DirectoryEntry {
+                name: name.to_string_lossy().into_owned(),
+                // A non-UTF-8 path can be displayed but cannot be passed back to Git.
+                path: relative.to_str().unwrap_or_default().into(),
+                kind,
+            });
+        }
+        entries.sort_by(|a, b| {
+            (a.kind != "folder")
+                .cmp(&(b.kind != "folder"))
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        Ok(entries)
+    }
+
     /// Resolve the working-tree file or its containing folder for the system opener.
     pub fn external_open_path(&self, path: &str, folder: bool) -> Result<PathBuf> {
         let full = self.safe_path(path)?;

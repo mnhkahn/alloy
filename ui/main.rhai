@@ -52,6 +52,9 @@ fn state_schema() { #{ fields: #{
     history_commits: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
     history_details: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
     history_doc: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
+    tree_mode: bool_field(false),
+    tree_epoch: #{schema:#{type:"integer"}, "default":#{type:"integer",value:0}},
+    tree_folders: #{schema:#{type:"ui_value"}, "default":#{type:"null"}},
     file_menu: string_field(""), rollback_path: string_field(""), delete_path: string_field(""),
     committed_paths: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
     operation_error: string_field(""),
@@ -90,7 +93,7 @@ fn loaded(ctx, result) {
     let entering_merge=result.snapshot != () && result.snapshot.merging && (prior==() || !prior.merging);
     if "document" in result {
         result.document = prepare_images(ctx, result.document);
-        if !ctx.get_state("log_mode") {audio_sync(ctx,result.document);}
+        if !ctx.get_state("log_mode") && !ctx.get_state("tree_mode") {audio_sync(ctx,result.document);}
     }
     if !ctx.get_state("ai_running") {ctx.set_state("busy", false);}
     status(ctx, result.message);
@@ -104,6 +107,7 @@ fn loaded(ctx, result) {
         let previous_snapshot = ctx.get_state("snapshot");
         let switched = previous_snapshot == () || previous_snapshot.root != result.snapshot.root;
         if switched {
+            tree_close(ctx);
             ctx.set_state("log_mode",false);ctx.set_state("history_commits",[]);ctx.set_state("history_details",());ctx.set_state("history_doc",());ctx.set_state("history_file","");ctx.set_state("history_selected","");ctx.set_state("history_more",false);
             let sessions = ctx.get_state("project_sessions"); if sessions == () { sessions = #{}; }
             if previous_snapshot != () { sessions[previous_snapshot.root] = #{commit:ctx.get_state("commit"),filter:ctx.get_state("filter"),selection:commit_selection(previous_snapshot)}; }
@@ -452,7 +456,11 @@ fn draft_change(ctx, value) { watch_invalidate(ctx); if !ctx.get_state("selectin
 fn open_repo(ctx, payload) { if guard(ctx) { request(ctx, "open", #{}); } }
 fn browse(ctx, payload) { if guard(ctx) { request(ctx, "browse", #{}); } }
 fn clone_repo(ctx, payload) { if guard(ctx) { request(ctx, "clone", #{url:ctx.get_state("url")}); } }
-fn refresh(ctx, payload) { if ctx.get_state("log_mode") {if guard(ctx) {history_request(ctx,"history",#{skip:0});} return;} if guard(ctx) && ctx.get_state("snapshot") != () { request(ctx, "refresh", #{default_selection:true}); } }
+fn refresh(ctx, payload) {
+    if ctx.get_state("tree_mode") {tree_reload(ctx);return;}
+    if ctx.get_state("log_mode") {if guard(ctx) {history_request(ctx,"history",#{skip:0});} return;}
+    if guard(ctx) && ctx.get_state("snapshot") != () { request(ctx, "refresh", #{default_selection:true}); }
+}
 fn file_menu_open(path, ctx, open) { ctx.set_state("file_menu",if open {path} else {""}); }
 fn can_rollback(ctx, path) { let paths=ctx.get_state("committed_paths"); if paths==() {return false;} for file in ctx.get_state("snapshot").files {if file.path==path {return paths.contains(path) || paths.contains(file.old_path);}} false }
 fn file_action(path, ctx, action) {
@@ -1059,6 +1067,7 @@ fn history_failed(ctx,error) {ctx.set_state("busy",false);status(ctx,`${error}`)
 fn history_commits(ctx) {let value=ctx.get_state("history_commits");if value==() {[]} else {value}}
 fn history_toggle(ctx,payload) {
     if !guard(ctx) || ctx.get_state("snapshot")==() {return;}
+    if ctx.get_state("tree_mode") {tree_close(ctx);}
     watch_invalidate(ctx);audio_stop(ctx);ctx.set_state("log_mode",!ctx.get_state("log_mode"));
     if ctx.get_state("log_mode") {history_request(ctx,"history",#{skip:0});}
 }
@@ -1152,6 +1161,107 @@ fn history_diff_view(ctx) {
 }
 fn history_view(ctx,s) {column([history_diff_view(ctx),history_panel(ctx,s)]).with_key("history-view").with_style(style().flex_grow().min_height(px(0)).min_width(px(0)))}
 
+fn tree_reset(ctx) {
+    ctx.set_state("tree_epoch",ctx.get_state("tree_epoch")+1);
+    ctx.set_state("tree_folders",#{});
+}
+fn tree_close(ctx) {
+    ctx.set_state("tree_mode",false);
+    tree_reset(ctx);
+}
+fn tree_reload(ctx) {
+    tree_reset(ctx);
+    tree_request(ctx,"");
+}
+fn tree_toggle(ctx,payload) {
+    if ctx.get_state("tree_mode") {tree_close(ctx);return;}
+    if ctx.get_state("busy") || ctx.get_state("selecting") || ctx.get_state("snapshot")==() {return;}
+    audio_stop(ctx);
+    ctx.set_state("log_mode",false);
+    ctx.set_state("tree_mode",true);
+    tree_reload(ctx);
+}
+fn tree_request(ctx,path) {
+    let folders=ctx.get_state("tree_folders");
+    folders[path]=#{open:true,loading:true,entries:[],error:""};
+    ctx.set_state("tree_folders",folders);
+    let epoch=ctx.get_state("tree_epoch");
+    ctx.start_task("alloy.git","execute",#{op:"tree",root:ctx.get_state("snapshot").root,path:path},
+        Fn("tree_loaded").curry(epoch,path),Fn("tree_failed").curry(epoch,path));
+}
+fn tree_finish(epoch,path,ctx,entries,error) {
+    if !ctx.get_state("tree_mode") || epoch!=ctx.get_state("tree_epoch") {return;}
+    let folders=ctx.get_state("tree_folders");
+    let folder=folders[path];
+    folders[path]=#{open:folder.open,loading:false,entries:entries,error:error};
+    ctx.set_state("tree_folders",folders);
+}
+fn tree_loaded(epoch,path,ctx,result) {tree_finish(epoch,path,ctx,result.entries,"");}
+fn tree_failed(epoch,path,ctx,error) {tree_finish(epoch,path,ctx,[],`${error}`);}
+fn tree_expand(ctx,path) {
+    if !ctx.get_state("tree_mode") || path=="" {return;}
+    let folders=ctx.get_state("tree_folders");
+    if !(path in folders) || (!folders[path].open && folders[path].error!="") {tree_request(ctx,path);return;}
+    folders[path].open=!folders[path].open;
+    ctx.set_state("tree_folders",folders);
+}
+fn tree_children(folder,path,depth) {
+    if folder.loading || folder.error!="" || folder.entries.len()==0 {
+        let label=if folder.loading {"Loading…"} else if folder.error!="" {folder.error} else {"Empty folder"};
+        return [#{key:`tree-message-${path}`,kind:"message",name:label,depth:depth}];
+    }
+    let children=[];
+    let index=folder.entries.len();
+    while index>0 {
+        index-=1;
+        let entry=folder.entries[index];
+        entry.key=if entry.path!="" {`tree-entry-${entry.path}`} else {`tree-unavailable-${path}/${index}`};
+        entry.depth=depth;
+        children.push(entry);
+    }
+    children
+}
+fn tree_rows(folders) {
+    let items=[];let stack=tree_children(folders[""],"",0);
+    while stack.len()>0 {
+        let entry=stack.pop();
+        entry.open=entry.kind=="folder" && entry.path!="" && entry.path in folders && folders[entry.path].open;
+        items.push(entry);
+        if entry.open {
+            for child in tree_children(folders[entry.path],entry.path,entry.depth+1) {stack.push(child);}
+        }
+    }
+    items
+}
+fn tree_row(ctx,payload) {
+    let item=payload.item;
+    let indent=px(8+16*min(item.depth,40));
+    let row_style=style().height(px(26)).padding_left(indent).padding_right(px(8)).gap(px(6)).items_center();
+    if item.kind=="message" {return row([small(item.name)]).with_style(row_style);}
+    let folder=item.kind=="folder";
+    let symbol=if folder {if item.open {"▾"} else {"▸"}} else if item.kind=="link" {"↗"} else {"·"};
+    let node=row([
+        small(symbol).with_style(style().width(px(12)).flex_shrink(false)),
+        text(item.name).with_style(style().min_width(px(0)).text_ellipsis().overflow_hidden().font_weight(if folder {600} else {400}))
+    ]).with_style(row_style);
+    if folder && item.path!="" {
+        node=node.with_style(style().hover(style().background(theme_color("surface_hover"))))
+            .accessibility_role("button").accessibility_label(if item.open {`Collapse ${item.path}`} else {`Expand ${item.path}`})
+            .tab_index(0).on_click_value(Fn("tree_expand"),item.path).on_key_value("enter",Fn("tree_expand"),item.path);
+    }
+    node
+}
+fn tree_view(ctx,s) {
+    let folders=ctx.get_state("tree_folders");
+    let items=if "" in folders {tree_rows(folders)} else {[]};
+    column([
+        row([text(`Tree · ${file_name(s.root)}`).with_style(style().font_weight(600)),button(ctx,"Local Changes",Fn("tree_toggle"),(),true)])
+            .with_style(style().padding(px(6)).gap(px(8)).items_center().justify_between().border_bottom(px(1)).border_color(theme_color("border"))),
+        virtual_collection(#{key:`tree-list-${s.root}`,label:"Repository directory tree",data:items,estimated_height:26,fill_height:true,overdraw_pixels:104},Fn("tree_row"))
+            .with_key("tree-list").with_style(style().flex_grow().min_height(px(0)))
+    ]).with_key("tree-view").with_style(style().flex_grow().min_height(px(0)).min_width(px(0)))
+}
+
 fn status_metric(key,symbol,count,label,color,with_tooltip) {
     let description=`${label}: ${count}`;
     let metric_style=style().font_family("Menlo").whitespace_nowrap().font_weight(if count>0 {700} else {400}).padding_x(px(4)).padding_y(px(1)).radius(px(3)).border(px(1));
@@ -1212,7 +1322,9 @@ fn view(ctx) {
         small(if s == () {"A home for your changes"} else {`${s.branch}  ·  ${s.upstream}`}),
         row([
             awake_checkbox(ctx),
-            button(ctx,"Log",Fn("history_toggle"),(),s != ()).with_style(style().background(if ctx.get_state("log_mode") {theme_color("selection")} else {theme_color("surface_raised")})),button(ctx,shortcut_label(ctx,"Refresh","alloy.refresh"),Fn("refresh"),(),s != ()),button(ctx,shortcut_label(ctx,"Fetch","alloy.fetch"),Fn("fetch"),(),s != ()),button(ctx,shortcut_label(ctx,"Pull","alloy.pull_prompt"),Fn("pull_prompt"),(),s != ()),button(ctx,shortcut_label(ctx,"Push","alloy.push_prompt"),Fn("push_prompt"),(),s != ()),button(ctx,shortcut_label(ctx,"Tag…","alloy.tag"),Fn("tag_prompt"),(),s != ())
+            button(ctx,"Log",Fn("history_toggle"),(),s != ()).with_style(style().background(if ctx.get_state("log_mode") {theme_color("selection")} else {theme_color("surface_raised")})),
+            button(ctx,"Tree",Fn("tree_toggle"),(),s != ()).with_key("repository-tree").with_style(style().background(if ctx.get_state("tree_mode") {theme_color("selection")} else {theme_color("surface_raised")})),
+            button(ctx,shortcut_label(ctx,"Refresh","alloy.refresh"),Fn("refresh"),(),s != ()),button(ctx,shortcut_label(ctx,"Fetch","alloy.fetch"),Fn("fetch"),(),s != ()),button(ctx,shortcut_label(ctx,"Pull","alloy.pull_prompt"),Fn("pull_prompt"),(),s != ()),button(ctx,shortcut_label(ctx,"Push","alloy.push_prompt"),Fn("push_prompt"),(),s != ()),button(ctx,shortcut_label(ctx,"Tag…","alloy.tag"),Fn("tag_prompt"),(),s != ())
         ]).with_style(style().gap(px(8)).items_center())
     ]).with_style(style().padding_x(px(10)).padding_y(px(4)).gap(px(16)).items_center().justify_between());
     let pathbar = row([
@@ -1229,7 +1341,7 @@ fn view(ctx) {
             button(ctx,"Clone repository",Fn("clone_repo"),(),true),
             small("Full-context diffs  /  Editable results  /  Three-way conflict resolution")
         ]).with_style(style().flex_grow().justify_center().padding(px(90)).gap(px(20)))
-    } else if ctx.get_state("log_mode") {history_view(ctx,s)} else { row(if ctx.get_state("sidebar_visible") {[sidebar(ctx,s),content(ctx)]} else {[content(ctx)]}).with_style(style().flex_grow().min_height(px(0)).min_width(px(0))) };
+    } else if ctx.get_state("tree_mode") {tree_view(ctx,s)} else if ctx.get_state("log_mode") {history_view(ctx,s)} else { row(if ctx.get_state("sidebar_visible") {[sidebar(ctx,s),content(ctx)]} else {[content(ctx)]}).with_style(style().flex_grow().min_height(px(0)).min_width(px(0))) };
     column([watch_timer::WatchTimer(#{key:"watch-timer",sequence:ctx.get_state("watch_tick_id"),on_tick:Fn("watch_tick")}),header,pathbar,project_form(ctx),palette_view(ctx),error_banner(ctx),confirmation(ctx),body,
         status_bar(ctx,s)
     ]).with_style(style().font_size(px(13)).line_height(px(18)).width(relative(1)).height(relative(1)).min_width(px(0)).min_height(px(0)).background(theme_color("surface")).text_color(theme_color("text_primary")))
