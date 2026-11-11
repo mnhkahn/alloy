@@ -928,6 +928,17 @@ impl Repository {
     pub fn staged_diff(&self) -> Result<String> {
         text(self.diff_cached(&[])?)
     }
+    /// Read-only input for commit-message generation; never use this to edit or stage content.
+    pub fn staged_diff_for_summary(&self) -> Result<String> {
+        let bytes = self.diff_cached(&[])?;
+        match String::from_utf8(bytes) {
+            Ok(diff) => Ok(diff),
+            Err(error) => Ok(format!(
+                "Note: This diff contains non-UTF-8 bytes, replaced with \u{fffd} for this read-only summary. Original file and staged bytes are unchanged.\n\n{}",
+                String::from_utf8_lossy(error.as_bytes())
+            )),
+        }
+    }
     /// True when the working tree and index are clean, including untracked files.
     pub fn clean(&self) -> Result<bool> {
         Ok(self

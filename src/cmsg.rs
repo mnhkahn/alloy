@@ -63,7 +63,7 @@ pub fn prepare_confirmed(
     Ok(PreparedDiff {
         files,
         stat: repo.staged_numstat()?,
-        diff: repo.staged_diff()?,
+        diff: repo.staged_diff_for_summary()?,
     })
 }
 

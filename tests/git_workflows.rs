@@ -824,6 +824,33 @@ fn ai_commit_prepare_uses_existing_index_only() {
     );
 }
 #[test]
+fn ai_commit_summary_tolerates_non_utf8_without_rewriting_content() {
+    let (_dir, repo) = fixture();
+    // No extension allowlist: legacy encodings can occur in any text file.
+    let path = "legacy.txt";
+    let staged = b"font glyph: \xc4\n";
+    fs::write(repo.root.join(path), staged).unwrap();
+    repo.stage(path).unwrap();
+    let working = b"font glyph: \xd6\n";
+    fs::write(repo.root.join(path), working).unwrap();
+
+    let prepared = alloy::cmsg::prepare(&repo).unwrap();
+    let summary = alloy::cmsg::compact(&prepared.diff);
+    assert!(summary.contains("non-UTF-8"));
+    assert!(summary.contains("+font glyph: \u{fffd}"));
+    assert!(repo.staged_diff().is_err(), "strict decoding stays strict");
+    assert_eq!(run(&repo.root, &["show", ":legacy.txt"], None).unwrap(), staged);
+    assert_eq!(fs::read(repo.root.join(path)).unwrap(), working);
+
+    let snapshot = repo.snapshot().unwrap();
+    let entry = snapshot.files.iter().find(|file| file.path == path).unwrap();
+    assert!(!repo.comparison_for_entry(entry, false, true).unwrap().editable);
+    repo.commit("test: preserve legacy encoding").unwrap();
+    assert_eq!(run(&repo.root, &["show", "HEAD:legacy.txt"], None).unwrap(), staged);
+    assert_eq!(fs::read(repo.root.join(path)).unwrap(), working);
+}
+
+#[test]
 fn ai_commit_prepare_blocks_sensitive_files() {
     let (_dir, r) = fixture();
     fs::write(r.root.join("app.log"), "x\n").unwrap();
