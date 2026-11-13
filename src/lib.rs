@@ -3,6 +3,7 @@ pub mod audio;
 pub mod awake;
 pub mod cmsg;
 pub mod commit;
+mod diagnostics;
 pub mod git;
 pub mod history;
 mod git_proxy;

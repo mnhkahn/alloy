@@ -1,6 +1,6 @@
 //! Multi-protocol generation for models registered through Alloy's UI.
 use serde::{Deserialize, Serialize};
-use std::{path::Path, time::Duration};
+use std::{path::Path, time::{Duration, Instant}};
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 const RETRIES: usize = 2;
@@ -75,7 +75,13 @@ fn generate_using(
     user: &str,
 ) -> Result<String, String> {
     if settings.selected_model.is_empty() {
-        crate::acp::generate(cwd, system, user)
+        crate::diagnostics::event("model.acp_start", serde_json::json!({}));
+        let started = Instant::now();
+        let result = crate::acp::generate(cwd, system, user);
+        crate::diagnostics::event("model.acp_finish", serde_json::json!({
+            "ok": result.is_ok(), "elapsed_ms": started.elapsed().as_millis(),
+        }));
+        result
     } else {
         let config = settings
             .direct_models
@@ -167,6 +173,12 @@ pub fn generate(config: &ModelConfig, system: &str, user: &str) -> Result<String
     let body = request_body(config, system, user);
     let mut attempt = 0;
     loop {
+        let started = Instant::now();
+        crate::diagnostics::event("model.request", serde_json::json!({
+            "provider": config.name, "model": config.model, "protocol": config.protocol,
+            "attempt": attempt + 1, "max_tokens": config.max_tokens,
+            "input_bytes": system.len() + user.len(),
+        }));
         let mut request = client
             .post(endpoint(&config.base_url, config.protocol))
             .json(&body);
@@ -181,8 +193,18 @@ pub fn generate(config: &ModelConfig, system: &str, user: &str) -> Result<String
             };
         }
         match send(request, config.protocol) {
-            Ok(text) => return Ok(text),
+            Ok(text) => {
+                crate::diagnostics::event("model.success", serde_json::json!({
+                    "attempt": attempt + 1, "elapsed_ms": started.elapsed().as_millis(),
+                    "output_bytes": text.len(),
+                }));
+                return Ok(text);
+            }
             Err((retryable, error)) => {
+                crate::diagnostics::event("model.failure", serde_json::json!({
+                    "attempt": attempt + 1, "elapsed_ms": started.elapsed().as_millis(),
+                    "retrying": retryable && attempt < RETRIES,
+                }));
                 if !retryable || attempt >= RETRIES {
                     return Err(error);
                 }
@@ -199,9 +221,13 @@ fn send(
 ) -> Result<String, (bool, String)> {
     let response = request.send().map_err(|e| {
         let retryable = e.is_timeout() || e.is_connect() || e.status().is_none();
+        crate::diagnostics::event("model.network_error", serde_json::json!({
+            "timeout": e.is_timeout(), "connect": e.is_connect(),
+        }));
         (retryable, format!("Model request failed: {e}"))
     })?;
     let status = response.status();
+    crate::diagnostics::event("model.http_status", serde_json::json!({"status": status.as_u16()}));
     if !status.is_success() {
         let detail = response.text().unwrap_or_default();
         let retryable = status.as_u16() == 429 || status.is_server_error();
@@ -212,12 +238,34 @@ fn send(
     }
     let payload: serde_json::Value = response
         .json()
-        .map_err(|e| (false, format!("Cannot parse model response: {e}")))?;
+        .map_err(|e| {
+            crate::diagnostics::event("model.invalid_json", serde_json::json!({}));
+            (false, format!("Cannot parse model response: {e}"))
+        })?;
     let text = response_text(&payload, protocol);
+    crate::diagnostics::event("model.response", response_diagnostics(&payload, &text));
     if text.is_empty() {
         return Err((true, "Model returned an empty response.".into()));
     }
     Ok(text)
+}
+
+// Select only diagnostic fields; never store headers, request bodies, reasoning,
+// or arbitrary provider error messages (which may echo credentials).
+fn response_diagnostics(payload: &serde_json::Value, text: &str) -> serde_json::Value {
+    serde_json::json!({
+        "actual_model": payload["model"],
+        "finish_reason": payload.pointer("/choices/0/finish_reason").unwrap_or(&serde_json::Value::Null),
+        "stop_reason": payload["stop_reason"],
+        "status": payload["status"],
+        "incomplete_reason": payload.pointer("/incomplete_details/reason").unwrap_or(&serde_json::Value::Null),
+        "prompt_tokens": payload.pointer("/usage/prompt_tokens").or_else(|| payload.pointer("/usage/input_tokens")),
+        "completion_tokens": payload.pointer("/usage/completion_tokens").or_else(|| payload.pointer("/usage/output_tokens")),
+        "reasoning_tokens": payload.pointer("/usage/completion_tokens_details/reasoning_tokens"),
+        "has_error": payload.get("error").is_some_and(|v| !v.is_null()),
+        "has_refusal": payload.pointer("/choices/0/message/refusal").is_some_and(|v| !v.is_null()),
+        "output_bytes": text.len(),
+    })
 }
 
 #[cfg(test)]
@@ -227,6 +275,27 @@ mod tests {
         io::{Read, Write},
         net::TcpListener,
     };
+
+    #[test]
+    fn diagnostics_capture_empty_reasoning_exhaustion_without_private_fields() {
+        let payload = serde_json::json!({
+            "model":"routed-model", "api_key":"secret-key",
+            "choices":[{"finish_reason":"length", "message":{
+                "content":"", "reasoning":"private reasoning", "refusal":null
+            }}],
+            "usage":{"completion_tokens":4096,"completion_tokens_details":{"reasoning_tokens":4096}},
+            "error":{"message":"secret-key"}
+        });
+        let diagnostic = response_diagnostics(&payload, "");
+        assert_eq!(diagnostic["actual_model"], "routed-model");
+        assert_eq!(diagnostic["finish_reason"], "length");
+        assert_eq!(diagnostic["reasoning_tokens"], 4096);
+        assert_eq!(diagnostic["output_bytes"], 0);
+        assert_eq!(diagnostic["has_error"], true);
+        let serialized = diagnostic.to_string();
+        assert!(!serialized.contains("secret-key"));
+        assert!(!serialized.contains("private reasoning"));
+    }
 
     #[test]
     fn direct_selection_sends_registered_endpoint_model_key_and_messages() {

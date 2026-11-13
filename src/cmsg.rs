@@ -212,7 +212,28 @@ pub fn generate_and_commit_confirmed(
     repo: &Repository,
     confirmed_tree: Option<&str>,
 ) -> Result<GeneratedCommit, String> {
-    let prepared = prepare_confirmed(repo, confirmed_tree)?;
+    let started = std::time::Instant::now();
+    crate::diagnostics::event("commit.start", serde_json::json!({"repo": repo.root}));
+    let result = generate_and_commit_inner(repo, confirmed_tree);
+    crate::diagnostics::event("commit.finish", serde_json::json!({
+        "elapsed_ms": started.elapsed().as_millis(),
+        "generated": result.is_ok(),
+        "committed": result.as_ref().is_ok_and(|value| value.commit_result.is_ok()),
+    }));
+    result.map_err(|error| {
+        let location = crate::diagnostics::path().map(|p| p.display().to_string()).unwrap_or_default();
+        format!("{error}\n生成诊断日志：{location}")
+    })
+}
+
+fn generate_and_commit_inner(
+    repo: &Repository,
+    confirmed_tree: Option<&str>,
+) -> Result<GeneratedCommit, String> {
+    let prepared = prepare_confirmed(repo, confirmed_tree).map_err(|error| {
+        crate::diagnostics::event("commit.prepare_failed", serde_json::json!({"error": error}));
+        error
+    })?;
     let diff = compact(&prepared.diff);
     let user = format!(
         "请为以下暂存的变更生成提交信息。\n\n文件列表：\n{}\n\n统计：\n{}\n\nDiff：\n{}",
@@ -220,8 +241,18 @@ pub fn generate_and_commit_confirmed(
         prepared.stat.trim(),
         diff
     );
-    let raw = llm::generate_selected(&repo.root, SYSTEM_PROMPT, &user)?;
-    let message = sanitize(&raw)?;
+    let raw = llm::generate_selected(&repo.root, SYSTEM_PROMPT, &user).map_err(|error| {
+        crate::diagnostics::event("commit.generation_failed", serde_json::json!({}));
+        error
+    })?;
+    let message = sanitize(&raw).map_err(|error| {
+        crate::diagnostics::event("commit.invalid_output", serde_json::json!({
+            "output_bytes": raw.len(),
+            "output": crate::diagnostics::excerpt(&raw),
+            "truncated": raw.len() > 16 * 1024,
+        }));
+        error
+    })?;
     // Keep the generated text available to the UI even when Git rejects the commit.
     let commit_result = if confirmed_tree.is_some()
         && confirmed_tree != Some(staged_tree(repo)?.as_str())
@@ -230,6 +261,7 @@ pub fn generate_and_commit_confirmed(
     } else {
         repo.commit(&message)
     };
+    crate::diagnostics::event("commit.git_result", serde_json::json!({"ok": commit_result.is_ok()}));
     Ok(GeneratedCommit {
         message,
         commit_result,
