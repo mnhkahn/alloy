@@ -1,7 +1,9 @@
 //! Opt-in task monitoring runs independently of rendering, focus and lock state.
 mod codex;
 mod command;
-mod herdr;
+mod native;
+pub use native::install_integrations;
+mod kimi;
 mod power;
 use serde::Serialize;
 use std::{
@@ -81,6 +83,7 @@ impl Drop for Monitor {
 }
 fn monitor(shared: Arc<Shared>) {
     let mut codex = codex::Codex::default();
+    let mut native = native::Native::default();
     loop {
         let generation = {
             let state = shared.state.lock().unwrap();
@@ -89,10 +92,10 @@ fn monitor(shared: Arc<Shared>) {
             }
             state.generation
         };
-        let (herdr, mut errors) = herdr::scan();
+        let (native, mut errors) = native.scan();
         let (codex, codex_errors) = codex.scan();
         errors.extend(codex_errors);
-        let agents = merge_agents(herdr, codex);
+        let agents = merge_agents(native, codex);
         let mut state = shared.state.lock().unwrap();
         if state.stop {
             return;
@@ -121,18 +124,11 @@ fn monitor(shared: Arc<Shared>) {
     }
 }
 
-fn merge_agents(mut herdr: Vec<Agent>, codex: Vec<Agent>) -> Vec<Agent> {
-    for agent in codex {
-        if let Some(existing) = herdr.iter_mut().find(|item| item.id == agent.id) {
-            // A Codex CLI hosted by Herdr is one agent, seen through two sources.
-            existing.title = agent.title;
-            existing.source = "Codex / Herdr".into();
-        } else {
-            herdr.push(agent);
-        }
-    }
-    herdr.sort_by(|a, b| (&a.name, &a.title, &a.id).cmp(&(&b.name, &b.title, &b.id)));
-    herdr
+fn merge_agents(mut native: Vec<Agent>, codex: Vec<Agent>) -> Vec<Agent> {
+    native.extend(codex);
+    native.sort_by(|a, b| (&a.name, &a.title, &a.id).cmp(&(&b.name, &b.title, &b.id)));
+    native.dedup_by(|a,b| a.id == b.id);
+    native
 }
 
 #[cfg(test)]
@@ -171,41 +167,27 @@ mod tests {
         );
     }
     #[test]
-    fn counts_agents_in_one_project_and_merges_shared_session_identity() {
-        let codex = ["a", "b"].map(|id| Agent {
-            id: format!("codex:{id}"),
-            name: "Codex".into(),
-            title: format!("Task {id}"),
-            project: "/same-project".into(),
-            source: "Codex".into(),
+    fn counts_agents_in_one_project() {
+        let agents = ["a", "b"].map(|id| Agent {
+            id: format!("codex:{id}"), name: "Codex".into(), title: format!("Task {id}"),
+            project: "/same-project".into(), source: "Codex".into(),
         });
-        let hosted = Agent {
-            name: "Codex CLI".into(),
-            title: "terminal title".into(),
-            source: "Herdr".into(),
-            ..codex[0].clone()
-        };
-        let agents = merge_agents(vec![hosted], codex.to_vec());
-        assert_eq!(agents.len(), 2);
-        let hosted = agents.iter().find(|agent| agent.id == "codex:a").unwrap();
-        assert_eq!(hosted.name, "Codex CLI");
-        assert_eq!(hosted.title, "Task a");
-        assert_eq!(hosted.source, "Codex / Herdr");
+        assert_eq!(merge_agents(vec![], agents.to_vec()).len(), 2);
     }
     #[test]
-    #[ignore = "manual smoke test against running local Codex/Herdr tasks"]
+    #[ignore = "manual smoke test against running local native agent tasks"]
     fn live_probes() {
-        let (herdr, errors) = herdr::scan();
+        let (native, errors) = native::Native::default().scan();
         assert!(errors.is_empty(), "{errors:?}");
         let (codex, errors) = codex::Codex::default().scan();
         assert!(errors.is_empty(), "{errors:?}");
         eprintln!(
-            "Herdr: {}; Codex: {}",
-            serde_json::to_string(&herdr).unwrap(),
+            "Native: {}; Codex: {}",
+            serde_json::to_string(&native).unwrap(),
             serde_json::to_string(&codex).unwrap()
         );
         assert!(
-            !codex.is_empty() || !herdr.is_empty(),
+            !codex.is_empty() || !native.is_empty(),
             "Start a local task before running this smoke test"
         );
         let monitor = Monitor::new(true);
@@ -235,7 +217,7 @@ mod tests {
             assert!(
                 assertions.lines().any(|line| {
                     line.contains(&format!("pid {}(", std::process::id()))
-                        && line.contains("Alloy: Codex or Herdr is working")
+                        && line.contains("Alloy: an agent is working")
                         && line.contains(kind)
                 }),
                 "missing {kind}: {assertions}"
@@ -251,7 +233,7 @@ mod tests {
                 .lines()
                 .any(
                     |line| line.contains(&format!("pid {}(", std::process::id()))
-                        && line.contains("Alloy: Codex or Herdr is working")
+                        && line.contains("Alloy: an agent is working")
                 )
         );
     }

@@ -40,7 +40,7 @@ impl Assertion {
                     native::CFStringCreateWithCString(std::ptr::null(), kind.as_ptr(), 0x08000100);
                 let name = native::CFStringCreateWithCString(
                     std::ptr::null(),
-                    c"Alloy: Codex or Herdr is working".as_ptr(),
+                    c"Alloy: an agent is working".as_ptr(),
                     0x08000100,
                 );
                 if kind.is_null() || name.is_null() {

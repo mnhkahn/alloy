@@ -259,7 +259,7 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
             ("id".into(), UiValue::String(id.into())), ("name".into(), UiValue::String(name.into())), ("title".into(), UiValue::String(title.into())),
             ("project".into(), UiValue::String("/same-project".into())), ("source".into(), UiValue::String("Local".into())),
         ]))).collect())),
-        ("error".into(), UiValue::String("Herdr unavailable".into())),
+        ("error".into(), UiValue::String("Agent status unavailable".into())),
     ]))).map_err(error)?;
     assert_eq!(get("awake_active"), UiValue::Bool(true));
     assert!(matches!(get("awake_agents"), UiValue::Array(agents) if agents.len()==2));
@@ -277,7 +277,7 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
     // The diff toolbar may legitimately contain "Local"; inspect only the agent list.
     assert_eq!(text_occurrences(list, "Local"), 0, "source labels must not appear in the agent list");
     assert_eq!(text_occurrences(tree, "/same-project"), 2);
-    assert!(matches!(get("awake_detail"), UiValue::String(detail) if detail.contains("Herdr unavailable")));
+    assert!(matches!(get("awake_detail"), UiValue::String(detail) if detail.contains("Agent status unavailable")));
     life.render(&mut engine).map_err(error)?;
     let _ = life.invoke_callback_transactional(&engine, &toggle, UiValue::Null).map_err(error)?;
     let _ = life.invoke_callback_transactional(&engine, &open, UiValue::Bool(false)).map_err(error)?;

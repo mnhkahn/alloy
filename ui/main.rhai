@@ -15,7 +15,7 @@ fn state_schema() { #{ fields: #{
     watch_epoch: #{schema:#{type:"integer"}, "default":#{type:"integer",value:0}},
     watch_seen: #{schema:#{type:"integer"}, "default":#{type:"integer",value:0}},
     watch_pending: bool_field(false), watch_root: string_field(""),
-    awake_enabled: bool_field(false), awake_active: bool_field(false), awake_detail: string_field("勾选后，在 Codex 或 Herdr 工作时保持系统和屏幕唤醒，防止闲置熄屏后自动锁屏。"),
+    awake_enabled: bool_field(false), awake_active: bool_field(false), awake_detail: string_field("勾选后，在 Codex、Kimi、OpenCode 或 Claude Code 工作时保持系统和屏幕唤醒，防止闲置熄屏后自动锁屏。"),
     awake_open: bool_field(false), awake_error: string_field(""),
     awake_agents: #{schema:#{type:"ui_value"}, "default":#{type:"null"}},
     root: string_field(""), url: string_field(""), filter: string_field(""), message: string_field("Opening Alloy…"), commit: string_field(""),
@@ -774,7 +774,7 @@ fn awake_checkbox(ctx) {
     let checked=ctx.get_state("awake_enabled");let agents=awake_agents(ctx);
     let checkbox=text(if checked {"✓"} else {""}).with_key("keep-awake-checkbox")
       .with_style(style().width(px(14)).height(px(14)).line_height(px(12)).flex_shrink(false).text_center().font_size(px(11)).font_weight(400).radius(px(3)).border(px(1)).border_color(if checked {theme_color("accent")} else {theme_color("text_muted")}).background(if checked {theme_color("accent")} else {theme_color("surface")}).text_color(theme_color("on_accent")))
-      .accessibility_role("checkbox").accessibility_label("Codex / Herdr 工作时保持唤醒").accessibility_checked(checked).tab_index(0)
+      .accessibility_role("checkbox").accessibility_label("Agent 工作时保持唤醒").accessibility_checked(checked).tab_index(0)
       .on_key_value("space",Fn("awake_toggle"),()).on_key_value("enter",Fn("awake_toggle"),()).on_click(Fn("awake_toggle"));
     let trigger=row([
         text("保持唤醒").with_style(style().font_size(px(12)).font_weight(400).line_height(px(18))),
