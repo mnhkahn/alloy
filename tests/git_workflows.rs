@@ -1276,6 +1276,33 @@ fn committed_changes_are_selected_again_on_refresh() {
 }
 
 #[test]
+fn staging_tracked_files_under_ignored_directories() {
+    let (_dir, r) = fixture();
+    let tracked = "篆書/words/tracked.txt";
+    let ignored = "篆書/words/local.txt";
+    fs::create_dir_all(r.root.join("篆書/words")).unwrap();
+    fs::write(r.root.join(".gitignore"), "words/\n").unwrap();
+    fs::write(r.root.join(tracked), "original\n").unwrap();
+    git(&r.root, &["add", ".gitignore"]);
+    git(&r.root, &["add", "-f", "--", tracked]);
+    git(&r.root, &["commit", "-m", "track a file in an ignored directory"]);
+
+    fs::write(r.root.join(tracked), "updated\n").unwrap();
+    fs::write(r.root.join(ignored), "local output\n").unwrap();
+    fs::write(r.root.join("new.txt"), "new\n").unwrap();
+    r.stage_committed_changes().unwrap();
+    assert_eq!(r.staged_names().unwrap(), vec![tracked]);
+
+    fs::write(r.root.join(tracked), "updated again\n").unwrap();
+    r.stage_paths(&[tracked.into(), "new.txt".into()], true).unwrap();
+    assert_eq!(r.staged_names().unwrap(), vec!["new.txt", tracked]);
+    assert_eq!(
+        run(&r.root, &["show", &format!(":{tracked}")], None).unwrap(),
+        b"updated again\n"
+    );
+}
+
+#[test]
 fn rollback_all_preserves_new_files_and_their_index_entries() {
     let (_dir, r) = fixture();
     fs::write(r.root.join("other.txt"), "original\n").unwrap();

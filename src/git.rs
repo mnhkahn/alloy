@@ -629,15 +629,34 @@ impl Repository {
                 }
             }
             if stage {
+                let indexed = run_index(
+                    &self.root,
+                    &["ls-files", "-z"],
+                    None,
+                    Some(index),
+                    120,
+                )?;
+                let indexed: std::collections::HashSet<_> = indexed.split(|b| *b == 0).collect();
+                let untracked: std::collections::HashSet<_> = snapshot
+                    .files
+                    .iter()
+                    .filter(|entry| entry.index == "?")
+                    .map(|entry| entry.path.as_str())
+                    .collect();
+                // -A scans for new files and can reject an ignored parent of a tracked file.
+                let mut update = vec!["add", "-u", "--"];
                 let mut add = vec!["add", "-A", "--"];
                 for path in &names {
-                    if fs::symlink_metadata(self.root.join(path)).is_ok()
-                        || self
-                            .cmd(&["ls-files", "--error-unmatch", "--", path])
-                            .is_ok()
+                    if indexed.contains(path.as_bytes()) {
+                        update.push(path);
+                    } else if untracked.contains(path.as_str())
+                        && fs::symlink_metadata(self.root.join(path)).is_ok()
                     {
                         add.push(path);
                     }
+                }
+                if update.len() > 3 {
+                    run_index(&self.root, &update, None, Some(index), 120)?;
                 }
                 if add.len() > 3 {
                     run_index(&self.root, &add, None, Some(index), 120)?;
