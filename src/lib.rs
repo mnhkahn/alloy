@@ -11,5 +11,6 @@ pub mod llm;
 pub mod preview;
 pub mod preferences;
 pub mod projects;
+mod svg_wiring;
 pub mod tag;
 pub mod watch;

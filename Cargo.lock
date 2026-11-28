@@ -170,6 +170,7 @@ dependencies = [
  "objc",
  "reqwest",
  "resvg 0.46.0",
+ "roxmltree 0.21.1",
  "semver",
  "serde",
  "serde_json",

@@ -42,6 +42,8 @@ fn state_schema() { #{ fields: #{
     focus_editor_id: #{ schema: #{ type: "ui_value" }, "default": #{ type: "integer", value: 0 } },
     shortcuts: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
     advanced: bool_field(false), image_actual: bool_field(false), svg_source: string_field(""),
+    wire_selection: #{schema:#{type:"ui_value"}, "default":#{type:"null"}},
+    wire_sequence: #{schema:#{type:"integer"}, "default":#{type:"integer",value:0}},
     audio_status: #{schema:#{type:"ui_value"}, "default":#{type:"null"}},
     partial: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
     included: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
@@ -77,6 +79,10 @@ fn prepare_images(ctx, document) {
         if preview != () && preview.error == "" {
             try { ctx.load_image(asset(preview.asset)); }
             catch (error) { document.images[side].error = `${error}`; }
+            if "wiring" in preview && preview.wiring != () {
+                try { ctx.load_image(asset(preview.wiring.muted_asset)); }
+                catch (ignored) { document.images[side].wiring = (); }
+            }
         }
     }
     document
@@ -122,6 +128,7 @@ fn loaded(ctx, result) {
         if switched {
             tree_close(ctx);
             ctx.set_state("svg_source", "");
+            ctx.set_state("wire_selection", ());
             ctx.set_state("log_mode",false);ctx.set_state("history_commits",[]);ctx.set_state("history_details",());ctx.set_state("history_doc",());ctx.set_state("history_file","");ctx.set_state("history_selected","");ctx.set_state("history_more",false);
             let sessions = ctx.get_state("project_sessions"); if sessions == () { sessions = #{}; }
             if previous_snapshot != () { sessions[previous_snapshot.root] = #{commit:ctx.get_state("commit"),filter:ctx.get_state("filter"),selection:commit_selection(previous_snapshot)}; }
@@ -259,7 +266,7 @@ fn hide_sidebar(ctx,payload) {ctx.set_state("sidebar_visible",false); focus_diff
 fn focus_diff(ctx,payload) { let d=ctx.get_state("doc"); if d != () && !show_image_preview(ctx,d,`work:${d.path}`) && d.note == "" { try {ctx.focus("active-diff");} catch (ignored) {} } }
 fn edit_focus(ctx,payload) {let d=ctx.get_state("doc"); if d != () && d.editable && !ctx.get_state("busy") && !ctx.get_state("selecting") {if image_source_available(d) {ctx.set_state("svg_source",`work:${d.path}`);} ctx.set_state("editor",true);ctx.set_state("focus_editor_id",ctx.get_state("focus_editor_id")+1);} }
 fn diff_settings(ctx,payload) { let d=ctx.get_state("doc"); if d != () && !show_image_preview(ctx,d,`work:${d.path}`) {ctx.set_state("mode_open",true);} }
-fn escape_action(ctx,payload) {ctx.set_state("palette","");ctx.set_state("confirm","");ctx.set_state("projects_open",false);ctx.set_state("mode_open",false);ctx.set_state("whitespace_open",false);ctx.set_state("add_project",false);focus_diff(ctx,());}
+fn escape_action(ctx,payload) {ctx.set_state("palette","");ctx.set_state("confirm","");ctx.set_state("projects_open",false);ctx.set_state("mode_open",false);ctx.set_state("whitespace_open",false);ctx.set_state("add_project",false);ctx.set_state("wire_selection",());focus_diff(ctx,());}
 fn push_prompt(ctx,payload) {
     if !guard(ctx) || ctx.get_state("snapshot")==() {return;}
     watch_invalidate(ctx);ctx.set_state("confirm","");ctx.set_state("busy",true);sync_update_guard(ctx);status(ctx,"Push…");
@@ -667,6 +674,73 @@ fn audio_pane(ctx,preview,label) {
     column(nodes).with_style(style().flex_basis(px(0)).flex_grow().min_width(px(0)).padding(px(12)).gap(px(12)))
 }
 fn image_zoom(ctx, payload) { ctx.set_state("image_actual", !ctx.get_state("image_actual")); }
+fn wiring_clicked(key, image_asset, ctx, event) {
+    if event.button != "left" { return; }
+    if event.canvas_key == () { ctx.set_state("wire_selection", ()); return; }
+    let sequence = ctx.get_state("wire_sequence") + 1;
+    ctx.set_state("wire_sequence", sequence);
+    ctx.set_state("wire_selection", #{ key:key, asset:image_asset, id:event.canvas_key.split(":")[0], flash:sequence });
+}
+fn wiring_end_flash(ctx, sequence) {
+    let selected = ctx.get_state("wire_selection");
+    if selected != () && selected.flash == sequence {
+        selected.flash = 0;
+        ctx.set_state("wire_selection", selected);
+    }
+}
+fn wiring_path(segments, sx, sy) {
+    let path = [];
+    for segment in segments {
+        let verb = segment[0].to_int();
+        path.push(switch verb {
+            0 => path_move(segment[1].to_float()*sx, segment[2].to_float()*sy),
+            1 => path_line(segment[1].to_float()*sx, segment[2].to_float()*sy),
+            2 => path_quadratic(segment[1].to_float()*sx, segment[2].to_float()*sy, segment[3].to_float()*sx, segment[4].to_float()*sy),
+            3 => path_cubic(segment[1].to_float()*sx, segment[2].to_float()*sy, segment[3].to_float()*sx, segment[4].to_float()*sy, segment[5].to_float()*sx, segment[6].to_float()*sy),
+            _ => path_close()
+        });
+    }
+    path
+}
+fn wiring_image(ctx, preview, key, w, h) {
+    let selected = ctx.get_state("wire_selection");
+    if selected != () && (selected.key != key || selected.asset != preview.asset) { selected = (); }
+    let sx = w / preview.width.to_float();
+    let sy = h / preview.height.to_float();
+    let wide = [];
+    let center = [];
+    let overlay = [];
+    let status = "Click a wire to see its endpoints. Press Esc to clear.";
+    for net in preview.wiring.nets {
+        let path = wiring_path(net.segments, sx, sy);
+        wide.push(canvas_stroke_path(`${net.id}:wide`, path, 14.0, rgba(0x00000000)));
+        center.push(canvas_stroke_path(`${net.id}:center`, path, 4.0, rgba(0x00000000)));
+        if selected != () && selected.id == net.id {
+            overlay.push(canvas_stroke_path(`${net.id}:selected`, path, 4.0, rgb(0x1672d4)));
+            status = net.name + " · ";
+            let index = 0;
+            for endpoint in net.endpoints {
+                if index > 0 { status += " ↔ "; }
+                status += endpoint.device + " " + endpoint.pin;
+                if selected.flash > 0 {
+                    let x = endpoint.x.to_float()*sx;
+                    let y = endpoint.y.to_float()*sy;
+                    overlay.push(canvas_circle(`${net.id}:point-${index}`, x, y, 7.0, rgba(0x1672d4df)));
+                    overlay.push(canvas_circle(`${net.id}:center-${index}`, x, y, 3.0, rgb(0xffffff)));
+                }
+                index += 1;
+            }
+            if selected.flash > 0 { timeout(`wire-flash-${selected.flash}`, 420, false, Fn("wiring_end_flash"), selected.flash); }
+        }
+    }
+    let image_asset = if selected == () { preview.asset } else { preview.wiring.muted_asset };
+    let image = image_source(asset(image_asset)).with_style(style().width(px(w)).height(px(h)).flex_shrink(false));
+    let hit_layer = canvas(canvas_scene(overlay + wide + center)).with_key(`${key}-wires`)
+        .accessibility_label("Wiring diagram").on("pointer_up", Fn("wiring_clicked").curry(key,preview.asset))
+        .with_style(style().absolute().left(px(0)).top(px(0)).width(px(w)).height(px(h)));
+    let diagram = column([image,hit_layer]).with_style(style().relative().width(px(w)).height(px(h)).flex_shrink(false));
+    [diagram, small(status).with_key(`${key}-endpoints`).with_style(style().padding_x(px(8)).padding_y(px(4)).flex_shrink(false))]
+}
 fn image_pane(ctx, key, preview, label, single) {
     let nodes = [text(label).with_style(style().padding(px(8)).background(theme_color("surface_raised")))];
     if preview == () { nodes.push(small("No image in this version")); }
@@ -679,8 +753,11 @@ fn image_pane(ctx, key, preview, label, single) {
             let scale = min(1.0, min(limit / w, 540.0 / h)); w *= scale; h *= scale;
         }
         let backdrop = if preview.format == "SVG" { rgba(0x85878aff) } else { rgba(0x303236ff) };
-        nodes.push(column([image_source(asset(preview.asset)).with_style(style().width(px(w)).height(px(h)).flex_shrink(false))])
+        let contents = if "wiring" in preview && preview.wiring != () { wiring_image(ctx,preview,key,w,h) }
+            else { [image_source(asset(preview.asset)).with_style(style().width(px(w)).height(px(h)).flex_shrink(false))] };
+        nodes.push(column([contents[0]])
             .with_key(key).with_style(style().flex_grow().min_height(px(0)).min_width(px(0)).padding(px(12)).overflow_x_scroll().overflow_y_scroll().background(backdrop)));
+        if contents.len() > 1 { nodes.push(contents[1]); }
     }
     column(nodes).with_style(style().flex_basis(px(0)).flex_grow().min_width(px(0)).min_height(px(0)))
 }

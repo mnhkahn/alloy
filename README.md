@@ -69,6 +69,10 @@ This is an initial desktop implementation, not a full IntelliJ editor. The compa
 
 PNG, JPEG, GIF, WebP, BMP, TIFF, ICO and SVG images have a dedicated preview with version comparison, dimensions, file size and a 100% view. New images use a single pane. Each image is limited to 32 MiB and 16 megapixels; animated images show a still frame. SVG previews use the contents of the selected revision and its embedded assets. **Show Source** opens the SVG text when it fits the editor limit. UTF-8 text up to 750 KB is editable. Binary/non-UTF-8 files, symbolic links, submodules and larger files are explicitly identified rather than showing truncated content; they can still be staged. Unusual non-UTF-8 filenames are reported as unsupported. Conflict marker detection is intentionally conservative. Auto-refresh/file watching, branch management, stash/rebase controls, signed/notarized distribution and GUI credential prompts are not yet implemented. Git operations time out after 120 seconds; refresh after a timeout to inspect actual repository state.
 
+Annotated SVG wiring diagrams support selecting a whole net by clicking any segment. The selected net is highlighted, other wires dim, and the endpoints flash with their device and pin names listed below the diagram. Click blank space or press **Esc** to clear. Alloy reads declarative annotations and handles input in the preview.
+
+The SVG places `<metadata id="wiring">` directly under the root. Its JSON contains `layer`, the ID of the wire group, and `nets`, an array of `{ "id", "name", "endpoints" }` objects. Each endpoint has `device`, `pin`, `x` and `y`. The coordinates are in the SVG viewport. Each clickable line or path inside the wire group has a unique `id`, `data-net` matching a net ID, and a `data-wire-hit` attribute. An electrical net can contain multiple paths and endpoints.
+
 ## Structure
 
 - `src/git.rs`: Git adapter, file guards, change blocks and conflict resolution; no UI dependencies.

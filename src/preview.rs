@@ -1,4 +1,5 @@
 //! Repository images never travel through Rhai strings or the text editor.
+pub use crate::svg_wiring::WiringPreview;
 use resvg::{tiny_skia, usvg};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -19,6 +20,8 @@ pub struct ImagePreview {
     pub bytes: usize,
     pub format: String,
     pub error: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wiring: Option<WiringPreview>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ImageComparison {
@@ -82,6 +85,7 @@ pub(crate) fn prepare_for_path(path: &str, bytes: &[u8]) -> ImagePreview {
             bytes: bytes.len(),
             format: String::new(),
             error,
+            wiring: None,
         },
     }
 }
@@ -91,10 +95,7 @@ fn prepare_inner(path: &str, bytes: &[u8]) -> Result<ImagePreview, String> {
     }
     let format = match image::guess_format(bytes) {
         Ok(format) => format,
-        Err(_) if is_svg_path(path) => {
-            let (width, height, png) = render_svg(bytes)?;
-            return cache_image(bytes, width, height, "SVG", "image/png", &png);
-        }
+        Err(_) if is_svg_path(path) => return render_svg(bytes),
         Err(_) => return Err("Invalid or unsupported image data.".into()),
     };
     let (name, mime) = match format {
@@ -136,7 +137,7 @@ fn check_dimensions(width: u32, height: u32) -> Result<(), String> {
     Ok(())
 }
 
-fn render_svg(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
+fn render_svg(bytes: &[u8]) -> Result<ImagePreview, String> {
     static FONTS: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
     let source = std::str::from_utf8(bytes).map_err(|e| format!("Cannot read SVG: {e}"))?;
     let fontdb = FONTS.get_or_init(|| {
@@ -145,7 +146,7 @@ fn render_svg(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
         Arc::new(database)
     });
     let resolve_data = usvg::ImageHrefResolver::default_data_resolver();
-    let options = usvg::Options {
+    let mut options = usvg::Options {
         image_href_resolver: usvg::ImageHrefResolver {
             resolve_data: Box::new(move |mime, data, options| {
                 // Check raster dimensions before decoding and skip compressed SVGs.
@@ -170,12 +171,33 @@ fn render_svg(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     let size = tree.size().to_int_size();
     let (width, height) = (size.width(), size.height());
     check_dimensions(width, height)?;
+    let png = svg_png(&tree, width, height)?;
+    let mut preview = cache_image(bytes, width, height, "SVG", "image/png", &png)?;
+    if source.contains("data-wire-hit")
+        && let Ok(xml) = roxmltree::Document::parse(source)
+        && let Some(diagram) = crate::svg_wiring::Diagram::parse(&xml, &tree)
+    {
+        options.style_sheet = Some(format!("#{} {{ opacity: 0.23 }}", diagram.layer));
+        if let Ok(muted) = usvg::Tree::from_xmltree(&xml, &options)
+            .map_err(|e| e.to_string())
+            .and_then(|tree| svg_png(&tree, width, height))
+            && png.len() + muted.len() <= CACHE_BYTES
+        {
+            let asset = format!("{}-wiring-muted", preview.asset);
+            let key = asset.strip_prefix("preview/").unwrap();
+            cache_asset(key, "image/png", &muted)?;
+            preview.wiring = Some(WiringPreview { muted_asset: asset, nets: diagram.nets });
+        }
+    }
+    Ok(preview)
+}
+
+fn svg_png(tree: &usvg::Tree, width: u32, height: u32) -> Result<Vec<u8>, String> {
     let mut pixmap = tiny_skia::Pixmap::new(width, height).ok_or("Cannot allocate SVG preview.")?;
-    resvg::render(&tree, tiny_skia::Transform::identity(), &mut pixmap.as_mut());
-    let png = pixmap
+    resvg::render(tree, tiny_skia::Transform::identity(), &mut pixmap.as_mut());
+    pixmap
         .encode_png()
-        .map_err(|e| format!("Cannot encode SVG preview: {e}"))?;
-    Ok((width, height, png))
+        .map_err(|e| format!("Cannot encode SVG preview: {e}"))
 }
 
 fn cache_image(
@@ -187,17 +209,7 @@ fn cache_image(
     asset_bytes: &[u8],
 ) -> Result<ImagePreview, String> {
     let key = format!("{:x}", Sha256::digest(bytes));
-    let mut cache = cache().lock().map_err(|e| e.to_string())?;
-    if !cache.iter().any(|v| v.key == key) {
-        while cache.iter().map(|v| v.bytes.len()).sum::<usize>() + asset_bytes.len() > CACHE_BYTES {
-            cache.pop_front();
-        }
-        cache.push_back(Cached {
-            key: key.clone(),
-            mime: mime.into(),
-            bytes: asset_bytes.to_vec(),
-        });
-    }
+    cache_asset(&key, mime, asset_bytes)?;
     Ok(ImagePreview {
         asset: format!("preview/{key}"),
         width,
@@ -205,7 +217,23 @@ fn cache_image(
         bytes: bytes.len(),
         format: format.into(),
         error: String::new(),
+        wiring: None,
     })
+}
+
+fn cache_asset(key: &str, mime: &str, asset_bytes: &[u8]) -> Result<(), String> {
+    let mut cache = cache().lock().map_err(|e| e.to_string())?;
+    if !cache.iter().any(|v| v.key == key) {
+        while cache.iter().map(|v| v.bytes.len()).sum::<usize>() + asset_bytes.len() > CACHE_BYTES {
+            cache.pop_front();
+        }
+        cache.push_back(Cached {
+            key: key.into(),
+            mime: mime.into(),
+            bytes: asset_bytes.to_vec(),
+        });
+    }
+    Ok(())
 }
 
 /// Store original audio bytes separately from image decoding.
@@ -219,4 +247,38 @@ pub(crate) fn cache_audio(bytes: &[u8]) -> Result<String, String> {
         cache.push_back(Cached { key: key.clone(), mime: "application/octet-stream".into(), bytes: bytes.to_vec() });
     }
     Ok(key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn annotated_svg_keeps_geometry_and_dims_only_the_wire_layer() {
+        let source = br#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50">
+            <metadata id="wiring">{"layer":"wires","nets":[{"id":"signal","name":"Data",
+              "endpoints":[{"device":"ESP32","pin":"G14","x":10,"y":20},
+              {"device":"Ring","pin":"DIN","x":90,"y":20}]}]}</metadata>
+            <rect width="100" height="50" fill="white"/>
+            <rect width="10" height="10" fill="blue"/>
+            <g id="wires" transform="translate(0 10)">
+              <line id="signal-a" data-net="signal" data-wire-hit="" x1="10" y1="10" x2="90" y2="10" stroke="red" stroke-width="4"/>
+            </g>
+        </svg>"#;
+        let preview = prepare_for_path("diagram.svg", source);
+        let wiring = preview.wiring.unwrap();
+        assert_eq!(wiring.nets.len(), 1);
+        let net = serde_json::to_value(&wiring.nets[0]).unwrap();
+        assert_eq!(net["segments"][0], serde_json::json!([0.0, 10.0, 20.0]));
+        assert_eq!(net["endpoints"][1]["pin"], "DIN");
+        let read = |asset: &str| {
+            let (_, png) = load_asset(asset.strip_prefix("preview/").unwrap()).unwrap();
+            image::load_from_memory(&png).unwrap().into_rgba8()
+        };
+        let base = read(&preview.asset);
+        let muted = read(&wiring.muted_asset);
+        assert_eq!(base.get_pixel(2, 2), muted.get_pixel(2, 2));
+        assert_eq!(base.get_pixel(50, 20).0, [255, 0, 0, 255]);
+        assert!(muted.get_pixel(50, 20).0[1] > 180);
+    }
 }

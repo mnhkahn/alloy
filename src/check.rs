@@ -318,6 +318,43 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
                     .map_err(error)?;
                 assert!(node_with_key(life.render(&mut engine).map_err(error)?, &image_key).is_some());
             }
+            if let Some(UiValue::Map(right)) = images.get("right")
+                && let Some(UiValue::Map(wiring)) = right.get("wiring")
+            {
+                let UiValue::String(path) = &doc["path"] else { unreachable!() };
+                let UiValue::Array(nets) = &wiring["nets"] else { unreachable!() };
+                let canvas_key = format!("image-right-{path}-wires");
+                let tree = life.render(&mut engine).map_err(error)?;
+                let canvas = node_with_key(tree, &canvas_key).ok_or("Missing wiring canvas")?;
+                let UiNodeKind::Canvas { scene } = canvas.kind() else { unreachable!() };
+                let hit_commands = scene.commands().len();
+                assert_eq!(hit_commands, nets.len() * 2);
+                let click = canvas.handler("pointer_up").and_then(UiEventHandler::as_script).unwrap().clone();
+                let mut last_click = UiValue::Null;
+                for net in nets.iter().take(2) {
+                    let UiValue::Map(net) = net else { unreachable!() };
+                    let UiValue::String(id) = &net["id"] else { unreachable!() };
+                    let UiValue::Array(endpoints) = &net["endpoints"] else { unreachable!() };
+                    let payload = crate::bridge::to_ui(serde_json::json!({"button":"left","canvas_key":format!("{id}:center")}));
+                    let _ = life.invoke_callback_transactional(&engine, &click, payload.clone()).map_err(error)?;
+                    last_click = payload;
+                    let UiValue::Map(selected) = get("wire_selection") else { unreachable!() };
+                    assert_eq!(selected["id"], UiValue::String(id.clone()));
+                    let tree = life.render(&mut engine).map_err(error)?;
+                    let UiNodeKind::Canvas { scene } = node_with_key(tree, &canvas_key).unwrap().kind() else { unreachable!() };
+                    assert_eq!(scene.commands().len(), hit_commands + 1 + 2 * endpoints.len());
+                    let flash_end = engine.callback(&compiled, "wiring_end_flash").map_err(error)?;
+                    let _ = life.invoke_callback_transactional(&engine, &flash_end, selected["flash"].clone()).map_err(error)?;
+                }
+                let blank = crate::bridge::to_ui(serde_json::json!({"button":"left","canvas_key":null}));
+                let _ = life.invoke_callback_transactional(&engine, &click, blank).map_err(error)?;
+                assert_eq!(get("wire_selection"), UiValue::Null);
+                let _ = life.invoke_callback_transactional(&engine, &click, last_click).map_err(error)?;
+                let escape = engine.callback(&compiled, "escape_action").map_err(error)?;
+                let _ = life.invoke_callback_transactional(&engine, &escape, UiValue::Null).map_err(error)?;
+                assert_eq!(get("wire_selection"), UiValue::Null);
+                eprintln!("SVG wiring preview checked: {} nets", nets.len());
+            }
         }
         if doc["conflict"] == UiValue::Bool(true) && doc["note"] == UiValue::String(String::new()) {
             let mut merge_snapshot = if let UiValue::Map(fields) = get("snapshot") {
