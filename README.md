@@ -71,6 +71,8 @@ PNG, JPEG, GIF, WebP, BMP, TIFF, ICO and SVG images have a dedicated preview wit
 
 Annotated SVG wiring diagrams support selecting a whole net by clicking any segment. The selected net is highlighted, other wires dim, and the endpoints flash with their device and pin names listed below the diagram. Click blank space or press **Esc** to clear. Alloy reads declarative annotations and handles input in the preview.
 
+SVGs from `cyeam wiring render` are recognized in Tree, Local Changes, and Log. Alloy reads the exported routes and renders its own click targets.
+
 The SVG places `<metadata id="wiring">` directly under the root. Its JSON contains `layer`, the ID of the wire group, and `nets`, an array of `{ "id", "name", "endpoints" }` objects. Each endpoint has `device`, `pin`, `x` and `y`. The coordinates are in the SVG viewport. Each clickable line or path inside the wire group has a unique `id`, `data-net` matching a net ID, and a `data-wire-hit` attribute. An electrical net can contain multiple paths and endpoints.
 
 ## Structure

@@ -721,7 +721,8 @@ fn wiring_image(ctx, preview, key, w, h) {
             let index = 0;
             for endpoint in net.endpoints {
                 if index > 0 { status += " ↔ "; }
-                status += endpoint.device + " " + endpoint.pin;
+                status += endpoint.device;
+                if endpoint.pin != "" { status += " " + endpoint.pin; }
                 if selected.flash > 0 {
                     let x = endpoint.x.to_float()*sx;
                     let y = endpoint.y.to_float()*sy;

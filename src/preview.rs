@@ -1,5 +1,6 @@
 //! Repository images never travel through Rhai strings or the text editor.
 pub use crate::svg_wiring::WiringPreview;
+use crate::svg_wiring::{Diagram, cyeam_stroke_ids, parse_xml};
 use resvg::{tiny_skia, usvg};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -167,18 +168,25 @@ fn render_svg(bytes: &[u8]) -> Result<ImagePreview, String> {
         fontdb: fontdb.clone(),
         ..usvg::Options::default()
     };
-    let tree = usvg::Tree::from_str(source, &options).map_err(|e| format!("Cannot read SVG: {e}"))?;
+    let mut xml = parse_xml(source);
+    let normalized = xml.as_ref().and_then(|doc| cyeam_stroke_ids(source, doc));
+    if let Some(normalized) = &normalized {
+        xml = parse_xml(normalized);
+    }
+    let tree = match &xml {
+        Some(doc) => usvg::Tree::from_xmltree(doc, &options),
+        None => usvg::Tree::from_str(source, &options),
+    }.map_err(|e| format!("Cannot read SVG: {e}"))?;
     let size = tree.size().to_int_size();
     let (width, height) = (size.width(), size.height());
     check_dimensions(width, height)?;
     let png = svg_png(&tree, width, height)?;
     let mut preview = cache_image(bytes, width, height, "SVG", "image/png", &png)?;
-    if source.contains("data-wire-hit")
-        && let Ok(xml) = roxmltree::Document::parse(source)
-        && let Some(diagram) = crate::svg_wiring::Diagram::parse(&xml, &tree)
+    if let Some(xml) = &xml
+        && let Some(diagram) = Diagram::parse(xml, &tree)
     {
         options.style_sheet = Some(format!("#{} {{ opacity: 0.23 }}", diagram.layer));
-        if let Ok(muted) = usvg::Tree::from_xmltree(&xml, &options)
+        if let Ok(muted) = usvg::Tree::from_xmltree(xml, &options)
             .map_err(|e| e.to_string())
             .and_then(|tree| svg_png(&tree, width, height))
             && png.len() + muted.len() <= CACHE_BYTES
@@ -280,5 +288,32 @@ mod tests {
         assert_eq!(base.get_pixel(2, 2), muted.get_pixel(2, 2));
         assert_eq!(base.get_pixel(50, 20).0, [255, 0, 0, 255]);
         assert!(muted.get_pixel(50, 20).0[1] > 180);
+    }
+
+    #[test]
+    fn cyeam_svg_projects_wire_hits_and_pins_through_nested_viewport() {
+        let source = br#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="120">
+            <rect id="alloy-cyeam-wire-0" width="200" height="120" fill="white"/>
+            <svg x="30" y="10" width="100" height="60" viewBox="0 0 50 20">
+                <g id="wires" transform="translate(1 2)">
+                    <line data-cyeam-wire="0" x1="5" y1="5" x2="35" y2="5" stroke="red" stroke-width="2"/>
+                </g>
+                <metadata id="cyeam-wire-routes">[{"wires":[0],"pins":[
+                    {"part":"ESP32","pin":"G14","at":[5,5]},
+                    {"part":"Open end","pin":"","at":[35,5]}
+                ]}]</metadata>
+            </svg>
+        </svg>"#;
+        let preview = prepare_for_path("diagram.interactive.svg", source);
+        assert_eq!(preview.bytes, source.len());
+        let wiring = preview.wiring.unwrap();
+        assert_eq!(wiring.nets.len(), 1);
+        let route = serde_json::to_value(&wiring.nets[0]).unwrap();
+        assert_eq!(route["segments"], serde_json::json!([[0.0, 42.0, 34.0], [1.0, 102.0, 34.0]]));
+        assert_eq!(route["endpoints"][0]["x"], 42.0);
+        assert_eq!(route["endpoints"][0]["y"], 34.0);
+        assert_eq!(route["endpoints"][1]["device"], "Open end");
+        assert_eq!(route["endpoints"][1]["x"], 102.0);
+        assert_eq!(route["endpoints"][1]["y"], 34.0);
     }
 }
