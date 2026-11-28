@@ -299,6 +299,25 @@ pub fn check(fixture: Option<serde_json::Value>) -> Result<(), String> {
                     }
                 }
             }
+            if images.get("source_available") == Some(&UiValue::Bool(true)) {
+                let UiValue::String(path) = &doc["path"] else {
+                    unreachable!()
+                };
+                let image_key = format!("image-right-{path}");
+                let tree = life.render(&mut engine).map_err(error)?;
+                assert!(node_with_key(tree, &image_key).is_some());
+                assert_eq!(text_occurrences(tree, "Show Source"), 1);
+                let toggle = engine.callback(&compiled, "toggle_image_source").map_err(error)?;
+                let source_key = UiValue::String(format!("work:{path}"));
+                let _ = life.invoke_callback_transactional(&engine, &toggle, source_key.clone())
+                    .map_err(error)?;
+                let tree = life.render(&mut engine).map_err(error)?;
+                assert!(node_with_key(tree, &image_key).is_none());
+                assert_eq!(text_occurrences(tree, "Show Preview"), 1);
+                let _ = life.invoke_callback_transactional(&engine, &toggle, source_key)
+                    .map_err(error)?;
+                assert!(node_with_key(life.render(&mut engine).map_err(error)?, &image_key).is_some());
+            }
         }
         if doc["conflict"] == UiValue::Bool(true) && doc["note"] == UiValue::String(String::new()) {
             let mut merge_snapshot = if let UiValue::Map(fields) = get("snapshot") {

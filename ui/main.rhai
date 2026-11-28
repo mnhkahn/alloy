@@ -41,7 +41,7 @@ fn state_schema() { #{ fields: #{
     focus_filter_id: #{ schema: #{ type: "ui_value" }, "default": #{ type: "integer", value: 0 } },
     focus_editor_id: #{ schema: #{ type: "ui_value" }, "default": #{ type: "integer", value: 0 } },
     shortcuts: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
-    advanced: bool_field(false), image_actual: bool_field(false),
+    advanced: bool_field(false), image_actual: bool_field(false), svg_source: string_field(""),
     audio_status: #{schema:#{type:"ui_value"}, "default":#{type:"null"}},
     partial: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
     included: #{ schema: #{ type: "ui_value" }, "default": #{ type: "null" } },
@@ -81,6 +81,16 @@ fn prepare_images(ctx, document) {
     }
     document
 }
+fn image_source_available(d) { d.images != () && d.images.source_available }
+fn show_image_preview(ctx, d, key) {
+    d.images != () && !(image_source_available(d) && ctx.get_state("svg_source") == key)
+}
+fn toggle_image_source(ctx, key) {
+    ctx.set_state("svg_source", if ctx.get_state("svg_source") == key { "" } else { key });
+}
+fn image_source_button(ctx, d, key) {
+    button(ctx, if show_image_preview(ctx,d,key) { "Show Source" } else { "Show Preview" }, Fn("toggle_image_source"), key, true)
+}
 // Compare staged file membership and full/partial inclusion independently of file order.
 fn commit_selection(snapshot) {
     let selected = #{};
@@ -111,6 +121,7 @@ fn loaded(ctx, result) {
         let switched = previous_snapshot == () || previous_snapshot.root != result.snapshot.root;
         if switched {
             tree_close(ctx);
+            ctx.set_state("svg_source", "");
             ctx.set_state("log_mode",false);ctx.set_state("history_commits",[]);ctx.set_state("history_details",());ctx.set_state("history_doc",());ctx.set_state("history_file","");ctx.set_state("history_selected","");ctx.set_state("history_more",false);
             let sessions = ctx.get_state("project_sessions"); if sessions == () { sessions = #{}; }
             if previous_snapshot != () { sessions[previous_snapshot.root] = #{commit:ctx.get_state("commit"),filter:ctx.get_state("filter"),selection:commit_selection(previous_snapshot)}; }
@@ -245,9 +256,9 @@ fn focus_commit(ctx,payload) { if ctx.get_state("snapshot") != () {ctx.set_state
 fn focus_files(ctx,payload) {ctx.set_state("sidebar_visible",true); ctx.set_state("focus_filter_id",ctx.get_state("focus_filter_id")+1);}
 fn toggle_sidebar(ctx,payload) {ctx.set_state("sidebar_visible",!ctx.get_state("sidebar_visible"));}
 fn hide_sidebar(ctx,payload) {ctx.set_state("sidebar_visible",false); focus_diff(ctx,());}
-fn focus_diff(ctx,payload) { let d=ctx.get_state("doc"); if d != () && d.images == () && d.note == "" { try {ctx.focus("active-diff");} catch (ignored) {} } }
-fn edit_focus(ctx,payload) {let d=ctx.get_state("doc"); if d != () && d.editable && !ctx.get_state("busy") && !ctx.get_state("selecting") {ctx.set_state("editor",true);ctx.set_state("focus_editor_id",ctx.get_state("focus_editor_id")+1);} }
-fn diff_settings(ctx,payload) { let d=ctx.get_state("doc"); if d != () && d.images == () {ctx.set_state("mode_open",true);} }
+fn focus_diff(ctx,payload) { let d=ctx.get_state("doc"); if d != () && !show_image_preview(ctx,d,`work:${d.path}`) && d.note == "" { try {ctx.focus("active-diff");} catch (ignored) {} } }
+fn edit_focus(ctx,payload) {let d=ctx.get_state("doc"); if d != () && d.editable && !ctx.get_state("busy") && !ctx.get_state("selecting") {if image_source_available(d) {ctx.set_state("svg_source",`work:${d.path}`);} ctx.set_state("editor",true);ctx.set_state("focus_editor_id",ctx.get_state("focus_editor_id")+1);} }
+fn diff_settings(ctx,payload) { let d=ctx.get_state("doc"); if d != () && !show_image_preview(ctx,d,`work:${d.path}`) {ctx.set_state("mode_open",true);} }
 fn escape_action(ctx,payload) {ctx.set_state("palette","");ctx.set_state("confirm","");ctx.set_state("projects_open",false);ctx.set_state("mode_open",false);ctx.set_state("whitespace_open",false);ctx.set_state("add_project",false);focus_diff(ctx,());}
 fn push_prompt(ctx,payload) {
     if !guard(ctx) || ctx.get_state("snapshot")==() {return;}
@@ -667,8 +678,9 @@ fn image_pane(ctx, key, preview, label, single) {
             let limit = if single {760.0} else {400.0};
             let scale = min(1.0, min(limit / w, 540.0 / h)); w *= scale; h *= scale;
         }
+        let backdrop = if preview.format == "SVG" { rgba(0x85878aff) } else { rgba(0x303236ff) };
         nodes.push(column([image_source(asset(preview.asset)).with_style(style().width(px(w)).height(px(h)).flex_shrink(false))])
-            .with_key(key).with_style(style().flex_grow().min_height(px(0)).min_width(px(0)).padding(px(12)).overflow_x_scroll().overflow_y_scroll().background(rgba(0x303236ff))));
+            .with_key(key).with_style(style().flex_grow().min_height(px(0)).min_width(px(0)).padding(px(12)).overflow_x_scroll().overflow_y_scroll().background(backdrop)));
     }
     column(nodes).with_style(style().flex_basis(px(0)).flex_grow().min_width(px(0)).min_height(px(0)))
 }
@@ -930,6 +942,8 @@ fn content(ctx) {
         return column([text("Select a file to review").with_style(style().typography("display")),small("Choose a changed file on the left. File changes refresh automatically.")])
             .with_style(style().flex_grow().items_center().justify_center().gap(px(12)));
     }
+    let source_key = `work:${d.path}`;
+    let show_image = show_image_preview(ctx,d,source_key);
     let toolbar = [
         navigation_button(ctx,"←",Fn("previous_file"),(),true), navigation_button(ctx,"→",Fn("next_file"),(),true),
         button(ctx,if ctx.get_state("editor") {"Hide editor"} else {"Edit"},Fn("edit"),(),d.editable),
@@ -938,7 +952,8 @@ fn content(ctx) {
     ];
     toolbar.push(navigation_button(ctx,if ctx.get_state("hide_unchanged") {"Show all lines"} else {"Hide unchanged"},Fn("toggle_unchanged"),(),true));
     if "audio" in d && d.audio != () { toolbar = [navigation_button(ctx,"←",Fn("previous_file"),(),true),navigation_button(ctx,"→",Fn("next_file"),(),true),small("Audio preview")]; }
-    if d.images != () { toolbar = [navigation_button(ctx,"←",Fn("previous_file"),(),true),navigation_button(ctx,"→",Fn("next_file"),(),true),small("Image preview"),navigation_button(ctx,if ctx.get_state("image_actual") {"Reduced size"} else {"Actual size (100%)"},Fn("image_zoom"),(),true)]; }
+    if show_image { toolbar = [navigation_button(ctx,"←",Fn("previous_file"),(),true),navigation_button(ctx,"→",Fn("next_file"),(),true),small("Image preview"),navigation_button(ctx,if ctx.get_state("image_actual") {"Reduced size"} else {"Actual size (100%)"},Fn("image_zoom"),(),true)]; }
+    if image_source_available(d) { toolbar.insert(2,image_source_button(ctx,d,source_key)); }
     if d.conflict {toolbar=[navigation_button(ctx,"←",Fn("previous_file"),(),true),navigation_button(ctx,"→",Fn("next_file"),(),true),small("Merge conflict · edit the center result")];}
     if dirty(ctx) { toolbar.push(button(ctx,"Save",Fn("save"),(),d.editable)); toolbar.push(button(ctx,"Discard",Fn("discard"),(),true)); }
     if ctx.get_state("advanced") && !d.conflict {
@@ -947,7 +962,7 @@ fn content(ctx) {
     }
     let old_path="";for file in ctx.get_state("snapshot").files {if file.path==d.path {old_path=file.old_path;}}
     let children = [document_tabs(ctx,d),diff_path_bar(ctx,d.path,old_path,"work-diff-path"),row(toolbar).with_style(style().height(px(34)).flex_shrink(false).gap(px(4)).padding_x(px(6)).items_center().overflow_x_scroll().background(theme_color("surface_raised")))];
-    if d.images != () {
+    if show_image {
         let panes = [];
         if !d.added { panes.push(image_pane(ctx,`image-left-${d.path}`,d.images.left,"HEAD",false)); }
         panes.push(image_pane(ctx,`image-right-${d.path}`,d.images.right,if d.staged {"Staged version"} else {"Current version"},d.added));
@@ -986,7 +1001,7 @@ fn content(ctx) {
         if ctx.get_state("whitespace") != "exact" { children.push(small("Choose Do not ignore to select or restore exact change blocks.")); }
 
     }
-    if ctx.get_state("editor") && d.editable && !d.conflict { children.push(editor(ctx,d)); }
+    if !show_image && ctx.get_state("editor") && d.editable && !d.conflict { children.push(editor(ctx,d)); }
     column(children).disabled(ctx.get_state("selecting")).with_style(style().flex_grow().min_width(px(0)).min_height(px(0)))
 }
 fn project_form(ctx) {
@@ -1155,8 +1170,14 @@ fn history_diff_view(ctx) {
     let left_label=if details.commit.parents.len()==0 {"Empty tree"} else {details.commit.parents[0].sub_string(0,8)};
     let right_label=details.commit.id.sub_string(0,8);
     let old_path="";for file in details.files {if file.path==d.path {old_path=file.old_path;}}
-    let nodes=[row([text(`Diff · ${file_name(d.path)}`).with_style(style().flex_grow().min_width(px(0)).text_ellipsis().overflow_hidden()),select::Select(#{key:"history-diff-mode",label:"Diff layout",options:[#{value:"split",label:"Side-by-side viewer"},#{value:"unified",label:"Unified viewer"}],value:ctx.get_state("mode"),open:ctx.get_state("mode_open"),query:"",empty_text:"No diff layouts",size:"xs",width:px(176),on_change:Fn("set_mode"),on_open_change:Fn("mode_open")}),button(ctx,"Close Diff",Fn("history_close_diff"),(),true)]).with_style(style().height(px(34)).flex_shrink(false).padding_x(px(8)).gap(px(8)).items_center().background(theme_color("surface_raised"))),diff_path_bar(ctx,d.path,old_path,"history-diff-path")];
-    if d.images!=() {nodes.push(row([image_pane(ctx,`history-left-${right_label}-${d.path}`,d.images.left,left_label,false),image_pane(ctx,`history-right-${right_label}-${d.path}`,d.images.right,right_label,false)]).with_style(style().flex_grow().min_height(px(0)).min_width(px(0))));}
+    let source_key=`history:${details.commit.id}:${d.path}`;
+    let show_image=show_image_preview(ctx,d,source_key);
+    let toolbar=[text(`Diff · ${file_name(d.path)}`).with_style(style().flex_grow().min_width(px(0)).text_ellipsis().overflow_hidden())];
+    if !show_image {toolbar.push(select::Select(#{key:"history-diff-mode",label:"Diff layout",options:[#{value:"split",label:"Side-by-side viewer"},#{value:"unified",label:"Unified viewer"}],value:ctx.get_state("mode"),open:ctx.get_state("mode_open"),query:"",empty_text:"No diff layouts",size:"xs",width:px(176),on_change:Fn("set_mode"),on_open_change:Fn("mode_open")}));}
+    if image_source_available(d) {toolbar.push(image_source_button(ctx,d,source_key));}
+    toolbar.push(button(ctx,"Close Diff",Fn("history_close_diff"),(),true));
+    let nodes=[row(toolbar).with_style(style().height(px(34)).flex_shrink(false).padding_x(px(8)).gap(px(8)).items_center().background(theme_color("surface_raised"))),diff_path_bar(ctx,d.path,old_path,"history-diff-path")];
+    if show_image {nodes.push(row([image_pane(ctx,`history-left-${right_label}-${d.path}`,d.images.left,left_label,false),image_pane(ctx,`history-right-${right_label}-${d.path}`,d.images.right,right_label,false)]).with_style(style().flex_grow().min_height(px(0)).min_width(px(0))));}
     else if "audio" in d && d.audio!=() {nodes.push(row([audio_pane(ctx,d.audio.left,left_label),audio_pane(ctx,d.audio.right,right_label)]).with_style(style().flex_grow().min_width(px(0))));}
     else if d.note!="" {nodes.push(text(d.note).with_style(style().padding(px(12))));}
     else {nodes.push(diff::DiffViewer(#{key:`history-diff-${right_label}-${d.path}`,left:#{source:d.left,label:left_label,file_name:d.path},right:#{source:d.right,label:right_label,file_name:d.path},mode:ctx.get_state("mode"),context_lines:3,whitespace:"exact",show_hunk_controls:false}).with_style(style().flex_grow().min_height(px(0)).min_width(px(0))));}
@@ -1292,21 +1313,22 @@ fn tree_file_view(ctx) {
     let path=ctx.get_state("tree_file");
     let d=ctx.get_state("tree_document");
     let error=ctx.get_state("tree_preview_error");
+    let source_key=`tree:${path}`;
     let preview=if path=="" {small("Select a file to view its contents.").with_style(style().padding(px(12)))}
         else if error!="" {text(error).with_style(style().padding(px(12)).text_color(theme_color("danger")))}
         else if d==() {small("Loading file…").with_style(style().padding(px(12)))}
         else if d.note!="" {small(d.note).with_style(style().padding(px(12)))}
-        else if d.images!=() {image_pane(ctx,`tree-image-${path}`,d.images.right,file_name(path),true)}
+        else if show_image_preview(ctx,d,source_key) {image_pane(ctx,`tree-image-${path}`,d.images.right,file_name(path),true)}
         else if d.audio!=() {audio_pane(ctx,d.audio.right,file_name(path))}
         else if d.right=="" {small("Empty file").with_style(style().padding(px(12)))}
         else {code::CodeViewer(#{key:`tree-code-${ctx.get_state("tree_preview_id")}`,source:d.right,file_name:path,label:path})
             .tab_index(0).with_style(style().flex_grow().min_height(px(0)).min_width(px(0)))};
     let nodes=[];
     if path!="" {
-        nodes.push(row([
-            text(path).with_style(style().flex_grow().min_width(px(0)).text_ellipsis().overflow_hidden()),
-            button(ctx,"Open Externally",Fn("tree_open_external"),path,true).with_style(style().flex_shrink(false))
-        ]).with_style(style().padding(px(6)).gap(px(8)).items_center().border_bottom(px(1)).border_color(theme_color("border"))));
+        let toolbar=[text(path).with_style(style().flex_grow().min_width(px(0)).text_ellipsis().overflow_hidden())];
+        if d!=() && image_source_available(d) {toolbar.push(image_source_button(ctx,d,source_key));}
+        toolbar.push(button(ctx,"Open Externally",Fn("tree_open_external"),path,true).with_style(style().flex_shrink(false)));
+        nodes.push(row(toolbar).with_style(style().padding(px(6)).gap(px(8)).items_center().border_bottom(px(1)).border_color(theme_color("border"))));
     }
     nodes.push(preview);
     column(nodes).with_key("tree-file-preview").with_style(style().flex_grow().min_height(px(0)).min_width(px(0)))

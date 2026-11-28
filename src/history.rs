@@ -240,28 +240,33 @@ pub fn diff(repo: &Repository, id: &str, path: &str) -> Result<Document> {
     }
     if doc.note.is_empty()
         && (crate::preview::supported_path(path)
+            || crate::preview::is_svg_path(previous)
             || crate::preview::has_image_signature(&left)
             || crate::preview::has_image_signature(&right))
     {
+        let source_available = (crate::preview::is_svg_path(path)
+            || crate::preview::is_svg_path(previous))
+            && [left.as_slice(), right.as_slice()]
+                .into_iter()
+                .all(crate::git::is_text_preview);
         doc.images = Some(crate::preview::ImageComparison {
             left: if change.status == "A" {
                 None
             } else {
-                Some(crate::preview::prepare(&left))
+                Some(crate::preview::prepare_for_path(previous, &left))
             },
             right: if change.status == "D" {
                 None
             } else {
-                Some(crate::preview::prepare(&right))
+                Some(crate::preview::prepare_for_path(path, &right))
             },
+            source_available,
         });
-    } else if left.len() > 750_000
-        || right.len() > 750_000
-        || left.contains(&0)
-        || right.contains(&0)
-        || std::str::from_utf8(&left).is_err()
-        || std::str::from_utf8(&right).is_err()
-    {
+        if !source_available {
+            return Ok(doc);
+        }
+    }
+    if !crate::git::is_text_preview(&left) || !crate::git::is_text_preview(&right) {
         doc.note = "Binary, non-UTF-8 or oversized file; text diff unavailable.".into();
     } else {
         doc.left = utf8(left)?;

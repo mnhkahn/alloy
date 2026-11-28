@@ -13,6 +13,10 @@ use std::{
 type Result<T> = std::result::Result<T, String>;
 const MAX_TEXT: usize = 750_000;
 
+pub(crate) fn is_text_preview(bytes: &[u8]) -> bool {
+    bytes.len() <= MAX_TEXT && !bytes.contains(&0) && std::str::from_utf8(bytes).is_ok()
+}
+
 pub fn run(dir: &Path, args: &[&str], input: Option<&[u8]>) -> Result<Vec<u8>> {
     run_index(dir, args, input, None, 120)
 }
@@ -295,10 +299,15 @@ impl Repository {
                 right: Some(crate::audio::prepare(path, &bytes)),
             });
         } else if image {
+            let source_available = crate::preview::is_svg_path(path) && is_text_preview(&bytes);
             document.images = Some(crate::preview::ImageComparison {
                 left: None,
-                right: Some(crate::preview::prepare(&bytes)),
+                right: Some(crate::preview::prepare_for_path(path, &bytes)),
+                source_available,
             });
+            if source_available {
+                document.right = text(bytes)?;
+            }
         } else if bytes.contains(&0) {
             document.note = "No preview is available for this binary file.".into();
         } else {
@@ -459,27 +468,39 @@ impl Repository {
             });
             return Ok(document);
         }
+        let left_path = if staged || head { old_path } else { path };
+        let mut images = None;
         if !special
             && !conflict
             && (crate::preview::supported_path(path)
+                || crate::preview::is_svg_path(left_path)
                 || crate::preview::has_image_signature(&left)
                 || crate::preview::has_image_signature(&right))
         {
-            let mut document = uneditable(path, exists, false, staged, "");
-            document.added = entry.index == "?" || ((head || staged) && entry.index == "A");
-            document.images = Some(crate::preview::ImageComparison {
+            let source_available = (crate::preview::is_svg_path(path)
+                || crate::preview::is_svg_path(left_path))
+                && [left.as_slice(), right.as_slice()]
+                    .into_iter()
+                    .all(is_text_preview);
+            images = Some(crate::preview::ImageComparison {
                 left: if left.is_empty() {
                     None
                 } else {
-                    Some(crate::preview::prepare(&left))
+                    Some(crate::preview::prepare_for_path(left_path, &left))
                 },
                 right: if right.is_empty() && (if staged { entry.index == "D" } else { !exists }) {
                     None
                 } else {
-                    Some(crate::preview::prepare(&right))
+                    Some(crate::preview::prepare_for_path(path, &right))
                 },
+                source_available,
             });
-            return Ok(document);
+            if !source_available {
+                let mut document = uneditable(path, exists, false, staged, "");
+                document.added = entry.index == "?" || ((head || staged) && entry.index == "A");
+                document.images = images;
+                return Ok(document);
+            }
         }
         let base = if conflict {
             self.optional_blob(&format!(":1:{path}"))?
@@ -499,7 +520,7 @@ impl Repository {
         if special
             || [&left, &right, &base, &ours, &theirs]
                 .iter()
-                .any(|b| b.len() > MAX_TEXT || b.contains(&0) || std::str::from_utf8(b).is_err())
+                .any(|b| !is_text_preview(b))
         {
             return Ok(uneditable(
                 path,
@@ -531,7 +552,7 @@ impl Repository {
             staged_hunks,
             path: path.into(),
             added: entry.index == "?" || ((head || staged) && entry.index == "A"),
-            images: None,
+            images,
             audio: None,
             left,
             right,

@@ -169,6 +169,7 @@ dependencies = [
  "notify",
  "objc",
  "reqwest",
+ "resvg 0.46.0",
  "semver",
  "serde",
  "serde_json",

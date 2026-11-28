@@ -696,6 +696,79 @@ fn favicon_previews_worktree_index_and_history_as_png() {
 }
 
 #[test]
+fn svg_previews_worktree_index_and_history_and_preserves_source_diffs() {
+    let (_dir, repo) = fixture();
+    let path = "icon.SVG";
+    let svg = |color| {
+        format!(
+            r#"<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 16">
+<rect width="24" height="16" fill="{color}"/>
+</svg>"#
+        )
+    };
+    let red = svg("red");
+    let blue = svg("blue");
+    let check_preview = |preview: &alloy::preview::ImagePreview, source: &str, pixel| {
+        assert!(preview.error.is_empty(), "{}", preview.error);
+        assert_eq!(preview.format, "SVG");
+        assert_eq!(preview.bytes, source.len());
+        assert_eq!((preview.width, preview.height), (24, 16));
+        let (mime, png) =
+            alloy::preview::load_asset(preview.asset.strip_prefix("preview/").unwrap()).unwrap();
+        assert_eq!(mime, "image/png");
+        let image = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(image.get_pixel(12, 8).0, pixel);
+    };
+
+    fs::write(repo.root.join(path), &red).unwrap();
+    let file = repo.working_file_preview(path).unwrap();
+    let images = file.images.unwrap();
+    assert!(images.source_available && images.left.is_none());
+    assert_eq!(file.right, red);
+    check_preview(&images.right.unwrap(), &red, [255, 0, 0, 255]);
+    let added = repo.document(path, false).unwrap();
+    assert!(added.added && added.editable);
+    assert!(added.images.unwrap().left.is_none());
+    repo.stage(path).unwrap();
+    git(&repo.root, &["commit", "-m", "add SVG"]);
+
+    fs::write(repo.root.join(path), &blue).unwrap();
+    let check_comparison = |doc: Document| {
+        assert_eq!((&doc.left, &doc.right), (&red, &blue));
+        assert_eq!(doc.hunks.len(), 1);
+        let images = doc.images.unwrap();
+        assert!(images.source_available);
+        check_preview(&images.left.unwrap(), &red, [255, 0, 0, 255]);
+        check_preview(&images.right.unwrap(), &blue, [0, 0, 255, 255]);
+    };
+    check_comparison(repo.document(path, false).unwrap());
+    repo.stage(path).unwrap();
+    check_comparison(repo.document(path, true).unwrap());
+    git(&repo.root, &["commit", "-m", "change SVG"]);
+    let head = String::from_utf8(run(&repo.root, &["rev-parse", "HEAD"], None).unwrap()).unwrap();
+    check_comparison(alloy::history::diff(&repo, head.trim(), path).unwrap());
+
+    for (source, expected) in [
+        ("<svg", "Cannot read SVG"),
+        (
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="10000" height="10000"/>"#,
+            "16 megapixel preview limit",
+        ),
+    ] {
+        fs::write(repo.root.join(path), source).unwrap();
+        let doc = repo.document(path, false).unwrap();
+        let images = doc.images.unwrap();
+        assert!(doc.editable && images.source_available);
+        assert_eq!(doc.right, source);
+        let right = images.right.unwrap();
+        assert!(right.asset.is_empty());
+        assert!(right.error.contains(expected), "{}", right.error);
+    }
+}
+
+#[test]
 fn images_bypass_text_limit_and_preserve_version_bytes() {
     let (_dir, r) = fixture();
     let mut bytes = std::io::Cursor::new(Vec::new());

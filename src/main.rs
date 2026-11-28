@@ -200,17 +200,24 @@ mod render_tests {
         image::DynamicImage::new_rgb8(64, 32)
             .save(dir.path().join("image.png"))
             .unwrap();
+        std::fs::write(
+            dir.path().join("image.svg"),
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32"><rect width="64" height="32" fill="red"/></svg>"#,
+        )
+        .unwrap();
         let r = alloy::git::Repository::open(dir.path().to_str().unwrap()).unwrap();
-        let mut doc = r.document("image.png", false).unwrap();
-        for single in [true, false] {
-            doc.added = single;
-            if !single {
-                doc.images.as_mut().unwrap().left = doc.images.as_ref().unwrap().right.clone();
+        for path in ["image.png", "image.svg"] {
+            let mut doc = r.document(path, false).unwrap();
+            for single in [true, false] {
+                doc.added = single;
+                if !single {
+                    doc.images.as_mut().unwrap().left = doc.images.as_ref().unwrap().right.clone();
+                }
+                super::check::check(Some(
+                    json!({"ok":true,"message":"Test","snapshot":r.snapshot().unwrap(),"overview":alloy::projects::Overview::from_snapshot(&r.snapshot().unwrap()),"document":doc}),
+                ))
+                .unwrap();
             }
-            super::check::check(Some(
-                json!({"ok":true,"message":"Test","snapshot":r.snapshot().unwrap(),"overview":alloy::projects::Overview::from_snapshot(&r.snapshot().unwrap()),"document":doc}),
-            ))
-            .unwrap();
         }
     }
     #[test]

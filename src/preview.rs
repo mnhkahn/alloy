@@ -1,10 +1,11 @@
 //! Repository images never travel through Rhai strings or the text editor.
+use resvg::{tiny_skia, usvg};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::VecDeque,
     io::Cursor,
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 pub const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
@@ -23,6 +24,8 @@ pub struct ImagePreview {
 pub struct ImageComparison {
     pub left: Option<ImagePreview>,
     pub right: Option<ImagePreview>,
+    #[serde(default)]
+    pub source_available: bool,
 }
 #[derive(Clone)]
 struct Cached {
@@ -42,9 +45,15 @@ pub fn supported_path(path: &str) -> bool {
         .is_some_and(|v| {
             matches!(
                 v.to_ascii_lowercase().as_str(),
-                "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tif" | "tiff" | "ico"
+                "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tif" | "tiff" | "ico" | "svg"
             )
         })
+}
+pub(crate) fn is_svg_path(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"))
 }
 pub fn has_image_signature(bytes: &[u8]) -> bool {
     image::guess_format(bytes).is_ok()
@@ -61,7 +70,10 @@ pub fn load_asset(key: &str) -> Result<(String, Vec<u8>), String> {
     Ok(result)
 }
 pub fn prepare(bytes: &[u8]) -> ImagePreview {
-    match prepare_inner(bytes) {
+    prepare_for_path("", bytes)
+}
+pub(crate) fn prepare_for_path(path: &str, bytes: &[u8]) -> ImagePreview {
+    match prepare_inner(path, bytes) {
         Ok(preview) => preview,
         Err(error) => ImagePreview {
             asset: String::new(),
@@ -73,11 +85,18 @@ pub fn prepare(bytes: &[u8]) -> ImagePreview {
         },
     }
 }
-fn prepare_inner(bytes: &[u8]) -> Result<ImagePreview, String> {
+fn prepare_inner(path: &str, bytes: &[u8]) -> Result<ImagePreview, String> {
     if bytes.len() > MAX_IMAGE_BYTES {
         return Err("Image exceeds the 32 MiB preview limit.".into());
     }
-    let format = image::guess_format(bytes).map_err(|_| "Invalid or unsupported image data.")?;
+    let format = match image::guess_format(bytes) {
+        Ok(format) => format,
+        Err(_) if is_svg_path(path) => {
+            let (width, height, png) = render_svg(bytes)?;
+            return cache_image(bytes, width, height, "SVG", "image/png", &png);
+        }
+        Err(_) => return Err("Invalid or unsupported image data.".into()),
+    };
     let (name, mime) = match format {
         image::ImageFormat::Png => ("PNG", "image/png"),
         image::ImageFormat::Jpeg => ("JPEG", "image/jpeg"),
@@ -92,9 +111,7 @@ fn prepare_inner(bytes: &[u8]) -> Result<ImagePreview, String> {
     let (width, height) = reader
         .into_dimensions()
         .map_err(|e| format!("Cannot read image: {e}"))?;
-    if width == 0 || height == 0 || u64::from(width) * u64::from(height) > MAX_PIXELS {
-        return Err("Image exceeds the 16 megapixel preview limit.".into());
-    }
+    check_dimensions(width, height)?;
     // Validate in the Git worker, so a corrupt image never breaks the Rhai render.
     let decoded = image::ImageReader::with_format(Cursor::new(bytes), format)
         .decode()
@@ -109,6 +126,66 @@ fn prepare_inner(bytes: &[u8]) -> Result<ImagePreview, String> {
     } else {
         bytes
     };
+    cache_image(bytes, width, height, name, mime, asset_bytes)
+}
+
+fn check_dimensions(width: u32, height: u32) -> Result<(), String> {
+    if width == 0 || height == 0 || u64::from(width) * u64::from(height) > MAX_PIXELS {
+        return Err("Image exceeds the 16 megapixel preview limit.".into());
+    }
+    Ok(())
+}
+
+fn render_svg(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
+    static FONTS: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
+    let source = std::str::from_utf8(bytes).map_err(|e| format!("Cannot read SVG: {e}"))?;
+    let fontdb = FONTS.get_or_init(|| {
+        let mut database = usvg::fontdb::Database::new();
+        database.load_system_fonts();
+        Arc::new(database)
+    });
+    let resolve_data = usvg::ImageHrefResolver::default_data_resolver();
+    let options = usvg::Options {
+        image_href_resolver: usvg::ImageHrefResolver {
+            resolve_data: Box::new(move |mime, data, options| {
+                // Check raster dimensions before decoding and skip compressed SVGs.
+                if data.starts_with(&[0x1f, 0x8b]) {
+                    return None;
+                }
+                if let Ok(format) = image::guess_format(&data) {
+                    let (width, height) = image::ImageReader::with_format(Cursor::new(&*data), format)
+                        .into_dimensions()
+                        .ok()?;
+                    check_dimensions(width, height).ok()?;
+                }
+                resolve_data(mime, data, options)
+            }),
+            // A repository SVG can be rendered from any revision without reading external files.
+            resolve_string: Box::new(|_, _| None),
+        },
+        fontdb: fontdb.clone(),
+        ..usvg::Options::default()
+    };
+    let tree = usvg::Tree::from_str(source, &options).map_err(|e| format!("Cannot read SVG: {e}"))?;
+    let size = tree.size().to_int_size();
+    let (width, height) = (size.width(), size.height());
+    check_dimensions(width, height)?;
+    let mut pixmap = tiny_skia::Pixmap::new(width, height).ok_or("Cannot allocate SVG preview.")?;
+    resvg::render(&tree, tiny_skia::Transform::identity(), &mut pixmap.as_mut());
+    let png = pixmap
+        .encode_png()
+        .map_err(|e| format!("Cannot encode SVG preview: {e}"))?;
+    Ok((width, height, png))
+}
+
+fn cache_image(
+    bytes: &[u8],
+    width: u32,
+    height: u32,
+    format: &str,
+    mime: &str,
+    asset_bytes: &[u8],
+) -> Result<ImagePreview, String> {
     let key = format!("{:x}", Sha256::digest(bytes));
     let mut cache = cache().lock().map_err(|e| e.to_string())?;
     if !cache.iter().any(|v| v.key == key) {
@@ -126,7 +203,7 @@ fn prepare_inner(bytes: &[u8]) -> Result<ImagePreview, String> {
         width,
         height,
         bytes: bytes.len(),
-        format: name.into(),
+        format: format.into(),
         error: String::new(),
     })
 }
